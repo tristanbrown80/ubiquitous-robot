@@ -179,7 +179,9 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 .cc-skills { margin-top: 4px; font-size: 11px; color: var(--ogt-dim); }
 .cc-traits { margin-top: 12px; padding: 10px 12px; border-left: 2px solid var(--ogt-gold); background: #14110c; border-radius: 0 6px 6px 0; color: #cfc7b8; }
 .cc-foot { display: flex; justify-content: space-between; padding: 12px 16px; border-top: 1px solid var(--ogt-line); }
-.ogt-chip.sel { border-color: var(--ogt-green); color: var(--ogt-green); background: #0d1f14; }
+.ogt-chip.sel, #ogt-cc .ogt-chip.sel { border-color: var(--ogt-green); color: var(--ogt-green); background: #0d1f14; box-shadow: 0 0 0 1px var(--ogt-green) inset; }
+#ogt-cc .ogt-chip:hover { border-color: var(--ogt-gold); }
+#ogt-cc .ogt-chip.sel:hover { border-color: var(--ogt-green); }
 #ogt-cc .ogt-btn { background: #111; color: var(--ogt-text); border: 1px solid #2c2c2c; border-radius: 6px; padding: 8px 14px; cursor: pointer; font-size: 12px; }
 #ogt-cc .ogt-btn.small { padding: 3px 8px; }
 #ogt-cc .ogt-spend { border-color: #1f6b3d; color: var(--ogt-green); background: #0d1f14; }

@@ -21,11 +21,11 @@ body.ogt-theme #chat .mes {
 }
 body.ogt-theme #chat .mes .avatar { display: none; }
 body.ogt-theme #chat .mes .mes_block { margin-left: 0 !important; padding: 0; }
-body.ogt-theme #chat .mes .mes_text { font-size: 15.5px; line-height: 1.65; color: var(--ogt-ink); }
-body.ogt-theme #chat .mes .mes_text p { margin: 0 0 .9em; }
-body.ogt-theme #chat .mes .mes_text em { color: #c9c3b6; }
-body.ogt-theme #chat .mes .mes_text q { color: #fff; }
-body.ogt-theme #chat .mes .mes_text strong { color: var(--ogt-gold2); font-weight: 600; }
+/* Message body: only set base size/leading on the container. Everything INSIDE a message (colors, fonts,
+   <style> blocks, immersive HTML) is left alone — descendant defaults below use :where() so they have
+   zero specificity and any author/inline style wins. */
+body.ogt-theme #chat .mes .mes_text { font-size: 15.5px; line-height: 1.65; }
+:where(body.ogt-theme #chat .mes .mes_text) p { margin: 0 0 .9em; }
 
 /* speaker line → gothic scene-title look */
 body.ogt-theme #chat .mes .ch_name { display: flex; align-items: center; gap: 8px; padding-bottom: 6px; margin-bottom: 8px; border-bottom: 1px solid #1f1f23; }
@@ -54,7 +54,7 @@ body.ogt-theme #send_form:focus-within { border-color: #1f6b3d !important; }
 body.ogt-theme #send_textarea { background: transparent !important; font-size: 15px; }
 
 /* inline images (e.g. Megumin / SD scene images) */
-body.ogt-theme #chat .mes .mes_text img:not(.emoji) { max-width: 100%; height: auto; border-radius: 10px; border: 1px solid #26262b; margin: 6px 0; box-shadow: 0 8px 24px rgba(0,0,0,.45); }
+:where(body.ogt-theme #chat .mes .mes_text) img:not(.emoji) { max-width: 100%; height: auto; border-radius: 10px; }
 body.ogt-theme #chat .mes .mes_img_container, body.ogt-theme #chat .mes .mes_img { border-radius: 10px; }
 
 /* panel on the right */
@@ -68,8 +68,6 @@ body.ogt-theme, body.ogt-theme * { scrollbar-width: thin; scrollbar-color: #2e2e
    ST styles almost everything through --SmartTheme* variables, so we retint those. */
 body.ogt-theme {
     --SmartThemeBodyColor: #e8e6e1;
-    --SmartThemeEmColor: #c9c3b6;
-    --SmartThemeQuoteColor: #ffffff;
     --SmartThemeBlurTintColor: rgba(12, 12, 14, .94);
     --SmartThemeChatTintColor: transparent;
     --SmartThemeUserMesBlurTintColor: transparent;
@@ -78,7 +76,7 @@ body.ogt-theme {
     --SmartThemeShadowColor: rgba(0, 0, 0, .55);
     --SmartThemeInputColor: #101012;
 }
-body.ogt-theme #sheld, body.ogt-theme #chat { background: transparent !important; border: 0 !important; box-shadow: none !important; backdrop-filter: none !important; }
+body.ogt-theme #sheld, body.ogt-theme #chat { background: transparent; border: 0; box-shadow: none; backdrop-filter: none; }
 
 /* panels / drawers / popups */
 body.ogt-theme .drawer-content, body.ogt-theme .popup, body.ogt-theme #left-nav-panel, body.ogt-theme #right-nav-panel {
@@ -86,12 +84,13 @@ body.ogt-theme .drawer-content, body.ogt-theme .popup, body.ogt-theme #left-nav-
     border: 1px solid #26262b !important; border-radius: 14px !important; box-shadow: 0 20px 60px rgba(0, 0, 0, .6) !important;
 }
 body.ogt-theme .inline-drawer-toggle, body.ogt-theme .inline-drawer-header { border-radius: 8px; }
-body.ogt-theme .menu_button, body.ogt-theme .menu_button_icon, body.ogt-theme .menu_button_icon { border-radius: 8px !important; border: 1px solid #26262b !important; background: #131316 !important; transition: border-color .15s, background .15s; }
-body.ogt-theme .menu_button:hover { border-color: #e9b872 !important; background: #1a1710 !important; }
-body.ogt-theme .text_pole, body.ogt-theme textarea, body.ogt-theme select, body.ogt-theme input[type=text], body.ogt-theme input[type=number], body.ogt-theme input[type=search], body.ogt-theme input[type=password] {
-    background: #101012 !important; border: 1px solid #26262b !important; border-radius: 8px !important; color: #e8e6e1;
+/* form controls: only ST's own UI chrome — never anything inside a chat message */
+body.ogt-theme :is(.drawer-content, .popup, #send_form, #top-settings-holder) :is(.menu_button, .menu_button_icon) { border-radius: 8px; border: 1px solid #26262b; background: #131316; transition: border-color .15s, background .15s; }
+body.ogt-theme :is(.drawer-content, .popup, #top-settings-holder) .menu_button:hover { border-color: #e9b872; background: #1a1710; }
+body.ogt-theme :is(.drawer-content, .popup, #send_form) :is(.text_pole, textarea, select, input[type=text], input[type=number], input[type=search], input[type=password]) {
+    background: #101012; border: 1px solid #26262b; border-radius: 8px; color: #e8e6e1;
 }
-body.ogt-theme .text_pole:focus, body.ogt-theme textarea:focus, body.ogt-theme select:focus { border-color: #1f6b3d !important; outline: none; }
+body.ogt-theme :is(.drawer-content, .popup) :is(.text_pole, textarea, select):focus { border-color: #1f6b3d; outline: none; }
 body.ogt-theme hr { border-color: #1f1f23; }
 body.ogt-theme .character_select, body.ogt-theme .group_select { border-radius: 10px; }
 

@@ -119,7 +119,16 @@
     const SKILL_ABILITY = {
         swordsmanship: 'str', archery: 'dex', stealth: 'dex', persuasion: 'cha', intimidation: 'cha', lore: 'int',
         survival: 'wis', alchemy: 'int', magic: 'int', smithing: 'str', medicine: 'wis', lockpicking: 'dex',
+        deception: 'cha', performance: 'cha', insight: 'wis',
     };
+    const AB_FULL = { str: 'Strength', dex: 'Dexterity', con: 'Constitution', int: 'Intelligence', wis: 'Wisdom', cha: 'Charisma' };
+    /** How an NPC feels about the player nudges social rolls: -4 (hostile) … +4 (devoted). Only applied when the check names the NPC. */
+    function socialBonus(s, npc) {
+        if (!npc) return 0;
+        const q = slug(npc);
+        const key = Object.keys(s.rel || {}).find((k) => slug(k) === q) || Object.keys(s.rel || {}).find((k) => slug(k).includes(q) || q.includes(slug(k)));
+        return key ? clamp(Math.round(s.rel[key].value / 15), -4, 4) : 0;
+    }
     const abilityOf = (sk) => sk.ability || SKILL_ABILITY[sk.id] || null;
     const skillBonus = (s, sk) => sk.rank + (abilityOf(sk) ? amod(s.stats?.[abilityOf(sk)]) : 0);
 
@@ -225,6 +234,8 @@
         ['Survival', 'Tracking, foraging, navigation, weather.'], ['Alchemy', 'Potions, poisons and reagents.'],
         ['Magic', 'Channeling mana into spells.'], ['Smithing', 'Forging and repairing arms and armor.'],
         ['Medicine', 'Treating wounds and illness.'], ['Lockpicking', 'Locks, traps and mechanisms.'],
+        ['Deception', 'Lying, bluffing, disguises and forgery.'], ['Performance', 'Music, oratory, acting and winning a crowd.'],
+        ['Insight', 'Reading intent, spotting lies and moods.'],
     ];
 
     function addSkill(s, name, desc = '', { base = 0, ability = null } = {}) {
@@ -475,8 +486,12 @@
                     };
                 } else {
                     const sk = findSkill(state, req.skill);
+                    const ab = ABILITIES.includes(req.ability) ? req.ability : null;
                     msg.extra.ogt_check = {
-                        ...base, kind: 'skill', skill: sk?.name || String(req.skill || 'Unskilled').slice(0, 30), trained: !!sk, bonus: sk ? skillBonus(state, sk) : 0,
+                        ...base, kind: 'skill', trained: !!sk, ability: sk ? abilityOf(sk) : ab,
+                        skill: sk?.name || (ab ? AB_FULL[ab] : String(req.skill || 'Unskilled').slice(0, 30)),
+                        bonus: sk ? skillBonus(state, sk) : (ab ? amod(state.stats?.[ab]) : 0),
+                        npc: req.npc ? String(req.npc).slice(0, 30) : undefined, rel: socialBonus(state, req.npc),
                         dc: clamp(Math.round(num(req.dc, 12)), 5, 30),
                     };
                 }
@@ -689,12 +704,15 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
         const adv = Math.sign(num(r.adv, 0));
         const nat = adv > 0 ? Math.max(dice.a, dice.b) : adv < 0 ? Math.min(dice.a, dice.b) : dice.a;
         const sk = findSkill(s, r.skill);
-        const bonus = sk ? skillBonus(s, sk) : 0;
-        const total = nat + bonus + mod;
+        const ab = ABILITIES.includes(r.ability) ? r.ability : null; // raw ability check when no skill fits
+        const bonus = sk ? skillBonus(s, sk) : (ab ? amod(s.stats?.[ab]) : 0);
+        const rel = socialBonus(s, r.npc);
+        const total = nat + bonus + mod + rel;
         const outcome = nat === 20 ? 'crit' : nat === 1 ? 'critfail'
             : total >= dc ? (total >= dc + 5 ? 'strong' : 'success') : (total <= dc - 5 ? 'badfail' : 'fail');
         return {
-            skill: sk?.name || String(r.skill || 'Unskilled').slice(0, 30), trained: !!sk,
+            skill: sk?.name || (ab ? `${AB_FULL[ab]}` : String(r.skill || 'Unskilled').slice(0, 30)), trained: !!sk, ability: sk ? abilityOf(sk) : ab,
+            npc: r.npc ? String(r.npc).slice(0, 30) : undefined, rel,
             bonus, mod, adv, dice: [dice.a, dice.b], nat, total, dc, outcome, why: String(r.why || '').slice(0, 80),
         };
     }
@@ -747,6 +765,12 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
         };
     }
 
+    const SOCIAL_RULES = `[Social — Charisma matters, but talking is not rolling]
+- Ordinary conversation, reasonable requests to friendly NPCs and anything low-stakes simply happen — no check.
+- Call for a check when an NPC has a real reason to resist and the result matters: persuading, haggling, bluffing, intimidating, seducing, performing, calming a crowd. Use Persuasion / Deception / Intimidation / Performance / Insight if the player has the skill; otherwise make it a raw ability check by omitting "skill" and giving "ability":"cha" (or "wis" to read someone, etc.).
+- Name the target NPC with "npc":"Helga". The game adds that NPC's attitude to the roll (friendlier = easier, hostile = harder). DC by what is asked: 10 small favor, 14 notable, 17 risky or against their interest, 20+ betrays their loyalties.
+- Afterwards reflect it in relationships ("rel"): a clear success warms them (+3..+10, more on a critical), a failure can cool them (-2..-8), a botched lie or insult can sour them sharply. Even a great roll can't make an NPC act wildly out of character.`;
+
     function checkBlock(s) {
         const sheet = s.skills.length ? s.skills.map((k) => `${k.name} ${fmtMod(skillBonus(s, k))}`).join(', ') : 'none (all checks are +0)';
         return `
@@ -755,10 +779,12 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
 When the player's action has real uncertainty AND a meaningful consequence for failing (an attack, sneaking past someone, persuading a resistant NPC, climbing, picking a lock, casting under pressure…), do NOT decide the outcome yourself. Narrate up to the moment of the attempt, STOP there, and request one check by putting it inside the SAME hidden tag you always append at the very end of the reply, e.g.
 <!--OGT:{"check":{"skill":"Stealth","dc":15,"mod":0,"adv":0,"why":"slip past the guards"}}-->
 The check must live ONLY inside that hidden <!--OGT:…--> comment. Never write it (or any JSON, "check:" or "dc") as visible text in the story.
-- Pick the best-fitting skill from the player's sheet (the bonus already includes its governing ability; no fitting skill = +0). Player skills: ${sheet}.
+- Pick the best-fitting skill from the player's sheet (the bonus already includes its governing ability). Player skills: ${sheet}. If none fits, omit "skill" and give "ability":"str|dex|con|int|wis|cha" for a raw ability check (bonus = that ability's modifier); with neither it is +0.
 - DC: 8 easy, 12 routine, 15 moderate, 18 hard, 22 heroic. For strong situational factors add "mod" (-5..+5) and "adv":1 (advantage) / -1 (disadvantage).
 - The player then clicks to roll. You will receive the result — either as a [ROLL RESULT] block or a player message beginning with [ROLL] — giving the total, the DC and the outcome (Critical Success, Strong Success, Success, Failure, Bad Failure or Critical Failure). Narrate EXACTLY that outcome honestly and let it matter; never ask for the same check again. If a result has no DC, judge the total against a fair DC for what they attempted.
 - Safe, trivial or purely conversational actions need no check — just narrate. At most one check per turn. Never state the dice numbers in your narration.
+
+${SOCIAL_RULES}
 
 [Combat — the game resolves every attack and tracks enemy HP]
 - Register each enemy the moment it appears, with sensible stats: <!--OGT:{"enemies":{"add":[{"name":"Goblin","hp":9,"ac":13}]}}-->. Typical AC: 10 unarmored, 12 light armor, 14 armored, 16+ heavy. Use "enemies":{"clear":true} when the fight ends.
@@ -782,7 +808,9 @@ When the player's action has real uncertainty AND a meaningful consequence for f
 2. Choose a DC: 8 easy, 12 routine, 15 moderate, 18 hard, 22 heroic. For strong situational factors add "mod" (-5..+5), and "adv":1 for advantage / -1 for disadvantage.
 3. nat = die #1 (advantage: the higher die; disadvantage: the lower). total = nat + skill bonus + mod. Natural 20 always succeeds, natural 1 always fails; otherwise total >= DC succeeds. Beating the DC by 5+ is a strong success; missing by 5+ is a bad failure.
 4. Narrate the outcome honestly and let it matter. Never fudge the result and never state the numbers in prose — the game shows the roll.
-5. Report it inside the hidden end-of-reply tag, e.g. <!--OGT:{"roll":{"skill":"Stealth","dc":15,"mod":0,"adv":0,"why":"slip past the guards"}}-->, never as visible text. At most one roll per turn; omit "roll" if no check was warranted.`;
+5. Report it inside the hidden end-of-reply tag, e.g. <!--OGT:{"roll":{"skill":"Stealth","dc":15,"mod":0,"adv":0,"why":"slip past the guards"}}-->, never as visible text. At most one roll per turn; omit "roll" if no check was warranted.
+
+${SOCIAL_RULES}`;
     }
 
     function rollHtml(r, kind = 'roll', sig = JSON.stringify(r)) {
@@ -798,7 +826,8 @@ When the player's action has real uncertainty AND a meaningful consequence for f
         }
         const sign = (n) => (n >= 0 ? `+ ${n}` : `− ${Math.abs(n)}`);
         const diceTxt = r.adv ? `d20 [${r.dice[0]}, ${r.dice[1]}] → ${r.nat} (${r.adv > 0 ? 'adv' : 'dis'})` : `d20 ${r.nat}`;
-        const parts = [diceTxt, `${sign(r.bonus)} ${r.trained ? 'skill' : 'untrained'}`];
+        const parts = [diceTxt, `${sign(r.bonus)} ${r.trained ? 'skill' : r.ability ? AB_NAME[r.ability] : 'untrained'}`];
+        if (r.rel) parts.push(`${sign(r.rel)} ${r.npc ? r.npc + "'s" : 'their'} attitude`);
         if (r.mod) parts.push(`${sign(r.mod)} situation`);
         return `<div class="ogt-roll ogt-card out-${r.outcome}" data-kind="${kind}" data-sig="${esc(sig)}">
             <div class="ogt-die">${r.nat}</div>
@@ -849,7 +878,9 @@ When the player's action has real uncertainty AND a meaningful consequence for f
         } else if (k.kind === 'defend') {
             title = `${k.enemy} attacks you`; math = `${sign(k.atk + k.mod)} to hit · your AC ${computeAC(getState())}`; btn = 'Defend';
         } else {
-            title = `${k.skill} check`; math = `${sign(k.bonus)} ${k.trained ? 'skill' : 'untrained'}${extra ? ' · ' + extra : ''} · DC ${k.dc}`; btn = 'Roll d20';
+            const src = k.trained ? `skill${k.ability ? ` (${AB_NAME[k.ability]})` : ''}` : k.ability ? AB_NAME[k.ability] : 'untrained';
+            const relTxt = k.rel ? ` · ${sign(k.rel)} ${k.npc ? k.npc + "'s" : 'their'} attitude` : '';
+            title = `${k.skill} check`; math = `${sign(k.bonus)} ${src}${relTxt}${extra ? ' · ' + extra : ''} · DC ${k.dc}`; btn = 'Roll d20';
         }
         return `<div class="ogt-roll ogt-card ogt-check" data-kind="check" data-sig="${esc(sig)}">
             <div class="ogt-die">d20</div>
@@ -910,8 +941,9 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
     const OUTCOME_TXT = { ...OUTCOMES };
     function rollMessage(res, label) {
         if (res.text) return `[ROLL] ${res.text}`;
-        const bonus = res.bonus ? ` ${res.bonus >= 0 ? '+' : '−'} ${Math.abs(res.bonus)} ${res.trained ? 'skill' : ''}`.trimEnd() : '';
-        const mod = res.mod ? ` ${res.mod >= 0 ? '+' : '−'} ${Math.abs(res.mod)} situation` : '';
+        const bonus = res.bonus ? ` ${res.bonus >= 0 ? '+' : '−'} ${Math.abs(res.bonus)} ${res.trained ? 'skill' : res.ability ? AB_NAME[res.ability] : ''}`.trimEnd() : '';
+        const mod = (res.rel ? ` ${res.rel >= 0 ? '+' : '−'} ${Math.abs(res.rel)} ${res.npc ? res.npc + "'s" : 'their'} attitude` : '')
+            + (res.mod ? ` ${res.mod >= 0 ? '+' : '−'} ${Math.abs(res.mod)} situation` : '');
         const die = res.adv ? `d20 [${res.dice[0]}, ${res.dice[1]}] → ${res.nat} (${res.adv > 0 ? 'advantage' : 'disadvantage'})` : `d20 ${res.nat}`;
         const dc = res.dc == null ? '' : ` vs DC ${res.dc} — ${OUTCOME_TXT[res.outcome]}`;
         return `[ROLL] ${label}: ${die}${bonus}${mod} = ${res.total}${dc}.`;
@@ -967,7 +999,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
     const CLASSES = [
         { id: 'warrior', name: 'Warrior', tag: 'Steel, grit and a shield wall.', hp: 34, mana: 2, grow: [7, 1], skills: [['Swordsmanship', 3], ['Intimidation', 1], ['Survival', 1]],
             traits: 'Trained soldier. Wears heavy armor and wields shields and blades with ease, shrugs off blows, and is hard to rattle. Clumsy at subtlety; has no real magic.' },
-        { id: 'rogue', name: 'Rogue', tag: 'Shadows, locks and quick knives.', hp: 24, mana: 4, grow: [5, 2], skills: [['Stealth', 3], ['Lockpicking', 2], ['Persuasion', 1]],
+        { id: 'rogue', name: 'Rogue', tag: 'Shadows, locks and quick knives.', hp: 24, mana: 4, grow: [5, 2], skills: [['Stealth', 3], ['Lockpicking', 2], ['Deception', 1]],
             traits: 'Light, fast and sneaky. Strikes from surprise for outsized damage, but is fragile in a straight fight and fights dirty.' },
         { id: 'mage', name: 'Mage', tag: 'Raw mana and forbidden pages.', hp: 18, mana: 16, grow: [3, 5], skills: [['Magic', 3], ['Lore', 2], ['Alchemy', 1]],
             traits: 'Scholar-caster. Spells and rituals cost mana (report as negative mana). Powerful at range and with knowledge, physically frail, exhausted when mana runs dry.' },
@@ -975,7 +1007,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
             traits: 'Devout healer. Divine prayers (heal, ward, smite the unholy) cost mana. Respected by the faithful, resented by cults and the undead.' },
         { id: 'ranger', name: 'Ranger', tag: 'Bow, wilds and patience.', hp: 28, mana: 5, grow: [6, 2], skills: [['Archery', 3], ['Survival', 3], ['Stealth', 1]],
             traits: 'Wilderness hunter and tracker. Deadly at range, at home outdoors, uncomfortable in cities and crowds.' },
-        { id: 'bard', name: 'Bard', tag: 'Silver tongue, sharp wit.', hp: 22, mana: 8, grow: [4, 3], skills: [['Persuasion', 3], ['Lore', 2], ['Stealth', 1]],
+        { id: 'bard', name: 'Bard', tag: 'Silver tongue, sharp wit.', hp: 22, mana: 8, grow: [4, 3], skills: [['Persuasion', 3], ['Performance', 2], ['Insight', 1]],
             traits: 'Charming performer and gossip. Talks their way into and out of trouble, picks up rumors everywhere; weak in direct combat. Minor magic through song costs mana.' },
         { id: 'deathknight', name: 'Death Knight', tag: 'Bound to a cold, dark power.', hp: 30, mana: 8, grow: [6, 3], skills: [['Swordsmanship', 2], ['Magic', 2], ['Intimidation', 2]],
             traits: 'Armored and bound to necrotic power. Dark abilities (life-drain, fear aura, unholy strikes) cost mana. Unsettles animals and the living, shunned by the faithful, and is unusually hard to kill.' },

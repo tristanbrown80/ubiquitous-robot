@@ -203,6 +203,31 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 .ogt-chip:hover:not(:disabled) { border-color: var(--ogt-gold); }
 .ogt-btn:disabled, .ogt-chip:disabled { opacity: .35; cursor: not-allowed; }
 .ogt-spend { border-color: #1f6b3d; color: var(--ogt-green); background: #0d1f14; }
+/* ability scores, AC, gear, combat */
+#ogt-panel .ogt-tab { font-size: 9px; padding: 8px 2px; letter-spacing: .05em; }
+.ogt-ac { position: absolute; top: 8px; right: 8px; z-index: 1; padding: 4px 9px; border-radius: 99px; font-weight: 700; font-size: 13px;
+    background: rgba(8, 8, 10, .8); border: 1px solid var(--ogt-gold); color: var(--ogt-gold); backdrop-filter: blur(6px); }
+.ogt-abilities { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; margin: 8px 0 6px; }
+.ogt-ab { position: relative; text-align: center; padding: 6px 0 5px; border: 1px solid var(--ogt-line); border-radius: 8px; background: var(--ogt-card); }
+.ogt-ab .n { font-size: 9px; letter-spacing: .08em; color: var(--ogt-dim); }
+.ogt-ab .v { font: 18px 'Pirata One', serif; line-height: 1.1; }
+.ogt-ab .m { font-size: 11px; color: var(--ogt-gold); }
+.ogt-ab button { position: absolute; top: -6px; right: -4px; width: 16px; height: 16px; border-radius: 50%; border: 0; cursor: pointer; font-size: 11px; line-height: 16px; padding: 0;
+    background: var(--ogt-green); color: #0b0b0d; font-weight: 700; }
+.ogt-acrow { font-size: 11px; color: var(--ogt-dim); margin: 4px 2px 8px; } .ogt-acrow b { color: var(--ogt-text); } .ogt-acrow .pts { color: var(--ogt-green); font-weight: 700; }
+.ogt-points small { margin-left: auto; font-size: 10px; color: var(--ogt-dim); }
+.ogt-field.ogt-inline { flex-direction: row; align-items: center; justify-content: space-between; margin: 6px 2px 0; } .ogt-field.ogt-inline input { width: 90px; }
+.ogt-item { margin-bottom: 8px; padding: 9px 12px; border: 1px solid var(--ogt-line); border-radius: 8px; background: linear-gradient(90deg, #1b1608, #100d06); }
+.ogt-item.eq { border-color: #1f6b3d; background: linear-gradient(90deg, #12301d, #0a1a11); }
+.ogt-item-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.ogt-item-name { font: 16px 'Pirata One', serif; color: var(--ogt-gold); } .ogt-item.eq .ogt-item-name { color: var(--ogt-green); } .ogt-item-name i { font: 12px 'Inter', sans-serif; color: var(--ogt-dim); }
+.ogt-item-meta { display: flex; align-items: center; gap: 8px; margin-top: 5px; }
+.ogt-foe { margin-bottom: 8px; padding: 8px 12px; border: 1px solid #5a1f1f; border-radius: 8px; background: linear-gradient(90deg, #2a1010, #120808); }
+.ogt-foe.dead { opacity: .45; }
+.ogt-foe-head, .ogt-foe-foot { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+.ogt-foe-head span:first-child { font: 16px 'Pirata One', serif; color: #fca5a5; }
+.ogt-foe .ogt-bar { margin: 5px 0; } .ogt-foe-foot { color: var(--ogt-dim); font-size: 11px; }
+
 /* dice roll card (inserted above a reply) */
 .ogt-roll { --c: #8d8678; display: flex; align-items: center; gap: 12px; margin: 6px 0 12px; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--c);
     flex: 0 0 auto; align-self: flex-start; width: fit-content; max-width: 100%; min-height: 0; height: auto; box-sizing: border-box;

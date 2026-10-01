@@ -88,6 +88,8 @@
             rel: {},
             quests: [],
             skills: [], skillPoints: 0,
+            stats: { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 }, statPoints: 0,
+            inv: [], gold: 0, enemies: [],
         };
     }
 
@@ -95,10 +97,117 @@
         const md = ctx().chatMetadata;
         if (!md) return defaultState();
         if (!md.ogt) md.ogt = defaultState();
-        // older saves / snapshots predate skills
-        if (!Array.isArray(md.ogt.skills)) md.ogt.skills = [];
-        if (!Number.isFinite(md.ogt.skillPoints)) md.ogt.skillPoints = 0;
-        return md.ogt;
+        const o = md.ogt;
+        // older saves / snapshots predate later features
+        if (!Array.isArray(o.skills)) o.skills = [];
+        if (!Number.isFinite(o.skillPoints)) o.skillPoints = 0;
+        if (!o.stats) o.stats = { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 };
+        if (!Number.isFinite(o.statPoints)) o.statPoints = 0;
+        if (!Array.isArray(o.inv)) o.inv = [];
+        if (!Number.isFinite(o.gold)) o.gold = 0;
+        if (!Array.isArray(o.enemies)) o.enemies = [];
+        return o;
+    }
+
+    // ───────────────────────── abilities, gear & combat ─────────────────────────
+    const ABILITIES = ['str', 'dex', 'con', 'int', 'wis', 'cha'];
+    const AB_NAME = { str: 'STR', dex: 'DEX', con: 'CON', int: 'INT', wis: 'WIS', cha: 'CHA' };
+    const amod = (score) => Math.floor((num(score, 10) - 10) / 2);
+    const fmtMod = (n) => (n >= 0 ? `+${n}` : `−${Math.abs(n)}`);
+    const profBonus = (lvl) => 2 + Math.floor((num(lvl, 1) - 1) / 4);
+    // each skill is governed by an ability: skill bonus = rank + that ability's modifier
+    const SKILL_ABILITY = {
+        swordsmanship: 'str', archery: 'dex', stealth: 'dex', persuasion: 'cha', intimidation: 'cha', lore: 'int',
+        survival: 'wis', alchemy: 'int', magic: 'int', smithing: 'str', medicine: 'wis', lockpicking: 'dex',
+    };
+    const abilityOf = (sk) => sk.ability || SKILL_ABILITY[sk.id] || null;
+    const skillBonus = (s, sk) => sk.rank + (abilityOf(sk) ? amod(s.stats?.[abilityOf(sk)]) : 0);
+
+    const rnd = (n) => { const b = new Uint32Array(1); crypto.getRandomValues(b); return b[0] % n; };
+    const DIE_SIDES = [2, 3, 4, 6, 8, 10, 12, 20];
+    /** "2d6+1" → {n, sides, plus}; dice count is capped by level so the model can't hand out absurd weapons. */
+    function parseDice(spec, level = 1) {
+        const m = String(spec || '').toLowerCase().replace(/\s/g, '').match(/^(\d{1,2})d(\d{1,3})([+-]\d{1,3})?$/);
+        if (!m || !DIE_SIDES.includes(+m[2])) return null;
+        const maxN = level >= 9 ? 4 : level >= 5 ? 3 : 2;
+        return { n: clamp(+m[1], 1, maxN), sides: +m[2], plus: clamp(+(m[3] || 0), -5, 10) };
+    }
+    const diceStr = (d) => (d ? `${d.n}d${d.sides}${d.plus ? (d.plus > 0 ? '+' : '') + d.plus : ''}` : '');
+    function rollDice(d, { crit = false, extra = 0 } = {}) {
+        const n = crit ? d.n * 2 : d.n;
+        const rolls = Array.from({ length: n }, () => 1 + rnd(d.sides));
+        return { rolls, total: rolls.reduce((a, b) => a + b, 0) + d.plus + extra };
+    }
+
+    // ── items ──
+    const ITEM_TYPES = ['weapon', 'armor', 'shield', 'potion', 'consumable', 'misc'];
+    function normItem(it, level = 1) {
+        const type = ITEM_TYPES.includes(it?.type) ? it.type : 'misc';
+        const o = { id: slug(it.name), name: String(it.name).slice(0, 40), type, qty: clamp(Math.round(num(it.qty, 1)), 1, 99), desc: String(it.desc || '').slice(0, 120), equipped: false };
+        if (type === 'weapon') {
+            o.dmg = diceStr(parseDice(it.dmg, level) || parseDice('1d6'));
+            o.ability = it.ability === 'dex' ? 'dex' : 'str';
+            o.bonus = clamp(Math.round(num(it.bonus, 0)), 0, Math.min(3, 1 + Math.floor(level / 4)));
+        } else if (type === 'armor') {
+            o.ac = clamp(Math.round(num(it.ac, 11)), 11, 18);
+            o.dexCap = it.dexCap == null || it.dexCap === '' ? (o.ac >= 16 ? 0 : o.ac >= 13 ? 2 : null) : clamp(Math.round(num(it.dexCap)), 0, 5);
+        } else if (type === 'shield') {
+            o.ac = clamp(Math.round(num(it.ac, 2)), 1, 3);
+        } else if (type === 'potion' || type === 'consumable') {
+            const h = parseDice(it.heal, level), m = parseDice(it.mana, level);
+            if (h) o.heal = diceStr(h);
+            if (m) o.mana = diceStr(m);
+        }
+        return o;
+    }
+    function addItem(s, it) {
+        if (!it?.name || !slug(it.name)) return null;
+        const n = normItem(it, s.level);
+        const have = s.inv.find((x) => x.id === n.id && x.type === n.type);
+        if (have) { have.qty = clamp(have.qty + n.qty, 1, 99); return have; }
+        s.inv.push(n);
+        return n;
+    }
+    function removeItem(s, name, qty = 1) {
+        const q = slug(name || '');
+        const it = s.inv.find((x) => x.id === q) || s.inv.find((x) => x.id.includes(q) || q.includes(x.id));
+        if (!it) return null;
+        it.qty -= Math.max(1, Math.round(num(qty, 1)));
+        if (it.qty <= 0) { s.inv = s.inv.filter((x) => x !== it); }
+        return it;
+    }
+    const equippedOf = (s, type) => s.inv.find((i) => i.type === type && i.equipped) || null;
+
+    /** AC = armor base (10 unarmored) + DEX mod (capped by the armor) + shield. */
+    function computeAC(s) {
+        const armor = equippedOf(s, 'armor'), shield = equippedOf(s, 'shield');
+        const dex = amod(s.stats?.dex);
+        const dexPart = armor && armor.dexCap != null ? Math.min(dex, armor.dexCap) : dex;
+        return (armor ? armor.ac : 10) + dexPart + (shield ? shield.ac : 0);
+    }
+
+    function attackProfile(s, spell = false) {
+        const w = spell ? null : equippedOf(s, 'weapon');
+        const ability = spell ? 'int' : (w?.ability || 'str');
+        const magic = w?.bonus || 0;
+        return { w, ability, magic, bonus: profBonus(s.level) + amod(s.stats?.[ability]) + magic };
+    }
+
+    // ── enemies (tracked by the game so HP is honest) ──
+    function findEnemy(s, name) {
+        const q = slug(name || '');
+        if (!q) return null;
+        const live = s.enemies.filter((e) => !e.defeated);
+        return live.find((e) => e.id === q) || live.find((e) => e.id.includes(q) || q.includes(e.id)) || null;
+    }
+    function addEnemy(s, e) {
+        if (!e?.name) return null;
+        let name = String(e.name).slice(0, 30), n = 2;
+        while (s.enemies.some((x) => x.name === name && !x.defeated)) name = `${String(e.name).slice(0, 26)} ${n++}`;
+        const hp = clamp(Math.round(num(e.hp, 8)), 1, 250);
+        const en = { id: slug(name), name, hp, hpMax: hp, ac: clamp(Math.round(num(e.ac, 12)), 5, 25), defeated: false };
+        s.enemies.push(en);
+        return en;
     }
 
     // ───────────────────────── skills ─────────────────────────
@@ -118,10 +227,11 @@
         ['Medicine', 'Treating wounds and illness.'], ['Lockpicking', 'Locks, traps and mechanisms.'],
     ];
 
-    function addSkill(s, name, desc = '', { base = 0 } = {}) {
+    function addSkill(s, name, desc = '', { base = 0, ability = null } = {}) {
         const id = slug(name);
         if (!id || s.skills.some((k) => k.id === id)) return null;
         const sk = { id, name: String(name).slice(0, 40), desc: String(desc || '').slice(0, 160), rank: Math.max(1, base), base };
+        if (ABILITIES.includes(ability)) sk.ability = ability;
         s.skills.push(sk);
         return sk;
     }
@@ -165,11 +275,13 @@
         while (s.xp >= xpNeeded(s.level)) {
             s.xp -= xpNeeded(s.level);
             s.level += 1;
-            s.hpMax += s.growth?.hp ?? 5; s.manaMax += s.growth?.mana ?? 2;
+            s.hpMax += Math.max(1, (s.growth?.hp ?? 5) + amod(s.stats?.con)); s.manaMax += s.growth?.mana ?? 2;
             s.hp = s.hpMax; s.mana = s.manaMax;
             const pts = Math.max(0, Math.round(num(settings().pointsPerLevel, 2)));
             s.skillPoints = (s.skillPoints || 0) + pts;
-            notes.push(['success', `Level up! ${s.name} is now level ${s.level}.${pts ? ` +${pts} skill points.` : ''}`]);
+            const asi = s.level % 2 === 0; // an ability point every even level
+            if (asi) s.statPoints = (s.statPoints || 0) + 1;
+            notes.push(['success', `Level up! ${s.name} is now level ${s.level}.${pts ? ` +${pts} skill points.` : ''}${asi ? ' +1 ability point.' : ''}`]);
         }
         return gained;
     }
@@ -201,6 +313,30 @@
             if (mode === 'free') gainXp(s, num(d.xp), notes);
             else if (mode === 'mixed') gainXp(s, clamp(num(d.xp), 0, MIXED_CAP), notes);
             // 'quests' mode: loose XP from the model is ignored
+        }
+
+        // loot, purchases, used-up items, gold (items are normalised/capped by normItem)
+        if (d.inv && typeof d.inv === 'object') {
+            for (const it of [].concat(d.inv.add || []).slice(0, 4)) {
+                const added = addItem(s, it);
+                if (added) notes.push(['info', `Gained: ${added.name}${it.qty > 1 ? ` ×${it.qty}` : ''}`]);
+            }
+            for (const it of [].concat(d.inv.remove || []).slice(0, 4)) {
+                const r = removeItem(s, typeof it === 'string' ? it : it?.name, it?.qty);
+                if (r) notes.push(['info', `Lost: ${r.name}`]);
+            }
+            if (d.inv.gold) {
+                const g = clamp(Math.round(num(d.inv.gold)), -9999, 9999);
+                s.gold = Math.max(0, s.gold + g);
+                notes.push(['info', `${g >= 0 ? '+' : ''}${g} gold`]);
+            }
+        }
+
+        // combat roster: the game tracks enemy HP from the player's hits
+        if (d.enemies && typeof d.enemies === 'object') {
+            if (d.enemies.clear) s.enemies = [];
+            for (const e of [].concat(d.enemies.add || []).slice(0, 6)) addEnemy(s, e);
+            for (const n of [].concat(d.enemies.remove || [])) s.enemies = s.enemies.filter((e) => e.id !== slug(typeof n === 'string' ? n : n?.name));
         }
 
         // the model may unlock a skill when the player genuinely learns one in the story (rank 1, free, max 1 per turn)
@@ -300,6 +436,7 @@
         const c = ctx();
         const msg = c.chat[id];
         if (!msg || msg.is_user || msg.is_system || typeof msg.mes !== 'string') return;
+        c.chat.forEach((m) => m.extra?.ogt_notes?.forEach((n) => { n.done = true; })); // the narrator has now seen them
         if (!hasTags(msg.mes)) {
             lastStatus = 'Last reply had NO tracker tag' + (s.autoScan ? ' — auto-scanning…' : '.');
             console.warn(`[${MODULE}] no OGT tag in reply`, msg.mes.slice(-200));
@@ -323,12 +460,26 @@
             // the model asks for a check; the player rolls it by clicking the card
             const req = deltas.find((d) => d?.check)?.check;
             if (req && typeof req === 'object') {
-                const sk = findSkill(state, req.skill);
-                msg.extra.ogt_check = {
-                    skill: sk?.name || String(req.skill || 'Unskilled').slice(0, 30), trained: !!sk, bonus: sk ? sk.rank : 0,
-                    dc: clamp(Math.round(num(req.dc, 12)), 5, 30), mod: clamp(Math.round(num(req.mod, 0)), -5, 5),
-                    adv: Math.sign(num(req.adv, 0)), why: String(req.why || '').slice(0, 80),
-                };
+                const base = { mod: clamp(Math.round(num(req.mod, 0)), -5, 5), adv: Math.sign(num(req.adv, 0)), why: String(req.why || '').slice(0, 80) };
+                const kind = String(req.kind || '').toLowerCase();
+                if (kind === 'attack') {
+                    const spell = !!req.spell;
+                    msg.extra.ogt_check = {
+                        ...base, kind: 'attack', spell, target: String(req.target || 'target').slice(0, 30), dmg: spell ? String(req.dmg || '1d8') : undefined,
+                        ac: clamp(Math.round(num(req.ac, findEnemy(state, req.target)?.ac ?? 12)), 5, 25), bonus: attackProfile(state, spell).bonus,
+                    };
+                } else if (kind === 'defend') {
+                    msg.extra.ogt_check = {
+                        ...base, kind: 'defend', enemy: String(req.enemy || 'The enemy').slice(0, 30), atk: clamp(Math.round(num(req.atk, 3)), 0, 4 + state.level),
+                        dmg: String(req.dmg || '1d6'), ac: computeAC(state),
+                    };
+                } else {
+                    const sk = findSkill(state, req.skill);
+                    msg.extra.ogt_check = {
+                        ...base, kind: 'skill', skill: sk?.name || String(req.skill || 'Unskilled').slice(0, 30), trained: !!sk, bonus: sk ? skillBonus(state, sk) : 0,
+                        dc: clamp(Math.round(num(req.dc, 12)), 5, 30),
+                    };
+                }
             }
         } else if (s.dice) {
             const roll = resolveRoll(deltas.find((d) => d?.roll)?.roll, pendingRoll, state);
@@ -354,7 +505,15 @@
             relationships: !settings().trackRel ? undefined : Object.fromEntries(Object.entries(s.rel).map(([n, r]) => [n, `${r.value} (${tierOf(r.value)})${r.note ? ' - ' + r.note : ''}`])),
             traits: s.traits || undefined,
             backstory: s.backstory || undefined,
-            skills: Object.fromEntries((s.skills || []).map((k) => [k.name, `${k.rank}/${settings().skillMaxRank} ${RANK_NAMES[k.rank] || ''}`])),
+            skills: Object.fromEntries((s.skills || []).map((k) => [k.name, `${fmtMod(skillBonus(s, k))} (rank ${k.rank}/${settings().skillMaxRank} ${RANK_NAMES[k.rank] || ''})`])),
+            abilities: Object.fromEntries(ABILITIES.map((a) => [AB_NAME[a], `${s.stats[a]} (${fmtMod(amod(s.stats[a]))})`])),
+            armor_class: computeAC(s),
+            gear: {
+                weapon: (() => { const w = equippedOf(s, 'weapon'); return w ? `${w.name} (${w.dmg}${w.bonus ? ` +${w.bonus}` : ''}, ${AB_NAME[w.ability]})` : 'unarmed'; })(),
+                armor: equippedOf(s, 'armor')?.name || 'none', shield: equippedOf(s, 'shield')?.name || 'none',
+                pack: Object.fromEntries(s.inv.filter((i) => !i.equipped).map((i) => [i.name, i.qty])), gold: s.gold,
+            },
+            enemies: s.enemies.filter((e) => !e.defeated).map((e) => ({ name: e.name, hp: `${e.hp}/${e.hpMax}`, ac: e.ac })),
             quests: s.quests.filter((q) => q.status === 'active').map((q) => ({ id: q.id, title: q.title, desc: q.desc, progress: q.progress, difficulty: q.difficulty, reward: `${questReward(q)} XP` })),
         };
         const extra = settings().extraRules?.trim();
@@ -362,19 +521,21 @@
 Current tracked state:
 ${JSON.stringify(compact)}
 
-Honour this state in the narrative (injured characters act injured, NPC attitudes match their relationship tier, active quests stay relevant). Skills are the player's real competence: rank 1 = novice, 5 = master. Let outcomes reflect them — a rank-1 skill fumbles under pressure, a rank-5 skill is reliable — and never let the player perform feats far above their rank or level without consequence. Skill ranks are raised by the player with skill points, not by you.
+Honour this state in the narrative (injured characters act injured, NPC attitudes match their relationship tier, active quests stay relevant). Skills are the player's real competence: rank 1 = novice, 5 = master. Let outcomes reflect them — a rank-1 skill fumbles under pressure, a rank-5 skill is reliable — and never let the player perform feats far above their rank or level without consequence. Skill ranks are raised by the player with skill points, not by you. The player's armor_class is derived from their gear and DEX; enemies must hit it. Items: use "inv.add" only for loot, rewards or purchases the player actually obtains (types: weapon with "dmg" dice and "ability" str/dex; armor with base "ac" 11 leather / 13-14 medium / 16+ heavy; shield "ac":2; potion/consumable with "heal"/"mana" dice; misc). Keep gear modest for the player's level. "gold" is a delta. Use "inv.remove" when an item is lost, stolen, given away or used up in the story; the game removes potions the player drinks itself.
 
 At the very END of EVERY reply, after all narrative, append exactly ONE hidden HTML comment with only the values that CHANGED this turn:
 <!--OGT:{...json...}-->
 Schema (omit anything unchanged; use {} content only if nothing changed — or omit the comment):
 {"hp":-3,"mana":-1,${settings().xpMode === 'quests' ? '' : '"xp":5,'}"class":"Death Knight",
  "scene":{"region":"King's Highway","location":"North of Crosshaven Gate","time":"Morning"},
-${settings().trackRel ? ' "rel":{"Vex Nightshade":{"delta":5,"note":"short reason / how they feel"}},\n' : ''}${settings().modelUnlockSkills ? ' "skills":{"unlock":[{"name":"Lockpicking","desc":"one line"}]},\n' : ''} "quests":{"add":[{"id":"short_id","title":"Quest title","desc":"one line objective","difficulty":"trivial|easy|medium|hard|deadly"}],
+${settings().trackRel ? ' "rel":{"Vex Nightshade":{"delta":5,"note":"short reason / how they feel"}},\n' : ''}${settings().modelUnlockSkills ? ' "skills":{"unlock":[{"name":"Lockpicking","desc":"one line"}]},\n' : ''} "inv":{"add":[{"name":"Shortsword","type":"weapon","dmg":"1d6","ability":"dex","qty":1},{"name":"Healing Potion","type":"potion","heal":"2d4+2","qty":1},{"name":"Chain Shirt","type":"armor","ac":13}],"remove":[{"name":"Rope","qty":1}],"gold":15},
+ "enemies":{"add":[{"name":"Goblin","hp":9,"ac":13}],"clear":true},
+ "quests":{"add":[{"id":"short_id","title":"Quest title","desc":"one line objective","difficulty":"trivial|easy|medium|hard|deadly"}],
            "update":[{"id":"short_id","progress":"what's done / what's next","milestone":true}],
            "complete":["short_id"],"fail":["short_id"]}}
 Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS (hp negative for damage, positive for healing). ${settings().xpMode === 'quests'
     ? 'Do NOT award xp yourself — the game pays XP automatically when a quest is completed. When a quest begins, pick its "difficulty" honestly relative to the player\'s level (trivial: errand; easy: minor risk; medium: real danger or effort; hard: serious threat; deadly: likely lethal). Add "milestone":true to a quest update only when a major objective step is genuinely finished (max 3 per quest). Put a quest id in "complete" only when its goal is fully achieved.'
-    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes. Valid JSON only, on a single line.${extra ? '\n' + extra : ''}${diceBlock(s)}${resultBlock()}`;
+    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes. Valid JSON only, on a single line.${extra ? '\n' + extra : ''}${diceBlock(s)}${resultBlock()}${notesBlock()}`;
     }
 
     function refreshPrompt() {
@@ -408,13 +569,28 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
             `<label>${label}<input data-ogt-field="${k}" type="${type}" value="${esc(s[k])}"></label>`;
         let h = `<div class="ogt-card">
             <div class="ogt-portrait" style="${av ? `background-image:url('${esc(av)}')` : ''}">${av ? '' : `<span>${esc(s.name[0] || '?')}</span>`}</div>
+            <div class="ogt-ac" title="Armor Class">🛡 ${computeAC(s)}</div>
             <div class="ogt-card-text"><div class="ogt-name">${esc(s.name)}</div><div class="ogt-class">${esc(s.class)}</div></div>
         </div>
         <div class="ogt-stats">
             ${bar('HP', 'hp', s.hp, s.hpMax)}
             ${bar('MANA', 'mana', s.mana, s.manaMax)}
             ${bar(`LVL ${s.level}`, 'xp', s.xp, xpNeeded(s.level))}
-        </div>`;
+        </div>
+        <div class="ogt-abilities">${ABILITIES.map((a) => `<div class="ogt-ab" title="${AB_NAME[a]} ${s.stats[a]}">
+            <div class="n">${AB_NAME[a]}</div><div class="v">${s.stats[a]}</div><div class="m">${fmtMod(amod(s.stats[a]))}</div>
+            ${s.statPoints > 0 && s.stats[a] < 20 ? `<button data-ogt-act="stat-up" data-ab="${a}" title="Spend an ability point">+</button>` : ''}</div>`).join('')}</div>
+        <div class="ogt-acrow">AC <b>${computeAC(s)}</b> · Proficiency <b>${fmtMod(profBonus(s.level))}</b> · <b>${s.gold}</b> gold${s.statPoints > 0 ? ` · <span class="pts">${s.statPoints} ability point${s.statPoints === 1 ? '' : 's'}</span>` : ''}</div>`;
+
+        const foes = s.enemies.filter((e) => !e.defeated);
+        if (s.enemies.length) {
+            h += `<div class="ogt-section">COMBAT</div>${s.enemies.map((e) => `<div class="ogt-foe ${e.defeated ? 'dead' : ''}" data-eid="${esc(e.id)}">
+                <div class="ogt-foe-head"><span>${esc(e.name)}</span><span>AC ${e.ac}</span></div>
+                <div class="ogt-bar"><div class="ogt-fill hp" style="width:${clamp((e.hp / e.hpMax) * 100, 0, 100)}%"></div></div>
+                <div class="ogt-foe-foot"><span>${e.defeated ? 'Defeated' : `${e.hp}/${e.hpMax} HP`}</span><button class="ogt-btn small" data-ogt-act="foe-del" title="Remove">✕</button></div></div>`).join('')}
+                ${foes.length ? '' : '<div class="ogt-empty">All enemies defeated.</div>'}
+                <button class="ogt-btn ogt-wide" data-ogt-act="foes-clear">End combat</button>`;
+        }
 
         if (s.skillPoints > 0) {
             h += `<button class="ogt-btn ogt-wide ogt-spend" data-ogt-act="goto-skills">${s.skillPoints} skill point${s.skillPoints === 1 ? '' : 's'} to spend ›</button>`;
@@ -436,6 +612,7 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
                 ${field('name', 'Name', 'text')}${field('class', 'Class', 'text')}${field('avatar', 'Portrait URL', 'text')}
                 ${field('level', 'Level')}${field('xp', 'XP')}
                 ${field('hp', 'HP')}${field('hpMax', 'Max HP')}${field('mana', 'Mana')}${field('manaMax', 'Max mana')}
+                ${ABILITIES.map((a) => `<label>${AB_NAME[a]}<input data-ogt-stat="${a}" type="number" min="1" max="30" value="${s.stats[a]}"></label>`).join('')}
             </div>`;
         }
 
@@ -512,7 +689,7 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
         const adv = Math.sign(num(r.adv, 0));
         const nat = adv > 0 ? Math.max(dice.a, dice.b) : adv < 0 ? Math.min(dice.a, dice.b) : dice.a;
         const sk = findSkill(s, r.skill);
-        const bonus = sk ? sk.rank : 0;
+        const bonus = sk ? skillBonus(s, sk) : 0;
         const total = nat + bonus + mod;
         const outcome = nat === 20 ? 'crit' : nat === 1 ? 'critfail'
             : total >= dc ? (total >= dc + 5 ? 'strong' : 'success') : (total <= dc - 5 ? 'badfail' : 'fail');
@@ -522,25 +699,80 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
         };
     }
 
+    const pickNat = (dice, adv) => (adv > 0 ? Math.max(dice.a, dice.b) : adv < 0 ? Math.min(dice.a, dice.b) : dice.a);
+
+    /** Player attack: d20 + proficiency + ability + weapon bonus vs the target's AC; on a hit roll weapon damage and hurt the tracked enemy. */
+    function resolveAttack(chk, dice, s) {
+        const spell = !!chk.spell;
+        const { w, ability, magic, bonus } = attackProfile(s, spell);
+        const adv = Math.sign(num(chk.adv, 0)), mod = clamp(Math.round(num(chk.mod, 0)), -5, 5);
+        const nat = pickNat(dice, adv), total = nat + bonus + mod;
+        const ac = clamp(Math.round(num(chk.ac, 12)), 5, 25);
+        const crit = nat === 20, hit = crit || (nat !== 1 && total >= ac);
+        const dmgDice = spell ? (parseDice(chk.dmg, s.level) || parseDice('1d8')) : (parseDice(w?.dmg) || parseDice('1d2'));
+        let dmg = 0;
+        if (hit) dmg = Math.max(1, rollDice(dmgDice, { crit, extra: spell ? 0 : amod(s.stats?.[ability]) + magic }).total);
+        const foe = findEnemy(s, chk.target);
+        if (hit && foe) { foe.hp = Math.max(0, foe.hp - dmg); if (foe.hp === 0) foe.defeated = true; }
+        const label = crit ? 'Critical Hit' : hit ? 'Hit' : nat === 1 ? 'Critical Miss' : 'Miss';
+        const how = spell ? 'spell' : (w ? w.name : 'unarmed');
+        const foeTxt = foe ? ` ${foe.name}: ${foe.hp}/${foe.hpMax} HP${foe.defeated ? ' — DEFEATED' : ''}.` : '';
+        const adTxt = adv ? ` (${adv > 0 ? 'advantage' : 'disadvantage'})` : '';
+        return {
+            kind: 'attack', nat, total, dice: [dice.a, dice.b], adv, outcome: crit ? 'crit' : hit ? 'success' : nat === 1 ? 'critfail' : 'fail',
+            title: `Attack · ${chk.target || 'target'}`, why: String(chk.why || '').slice(0, 80), label,
+            line: `d20 ${nat} ${fmtMod(bonus + mod)} = ${total} vs AC ${ac}${hit ? ` · ${dmg} damage` : ''}${foe ? ` · ${foe.name} ${foe.hp}/${foe.hpMax}${foe.defeated ? ' ☠' : ''}` : ''}`,
+            text: `Attack on ${chk.target || 'the target'} with ${how}: d20 ${nat}${adTxt} ${fmtMod(bonus + mod)} = ${total} vs AC ${ac} — ${label.toUpperCase()}${hit ? `, ${dmg} damage dealt (already applied by the game)` : ''}.${foeTxt}`,
+        };
+    }
+
+    /** Enemy attack on the player: d20 + enemy attack bonus vs the player's AC; damage is applied to player HP by the game. */
+    function resolveDefend(chk, dice, s) {
+        const ac = computeAC(s);
+        const atk = clamp(Math.round(num(chk.atk, 3)), 0, 4 + s.level);
+        const adv = Math.sign(num(chk.adv, 0)), mod = clamp(Math.round(num(chk.mod, 0)), -5, 5);
+        const nat = pickNat(dice, adv), total = nat + atk + mod;
+        const crit = nat === 20, hit = crit || (nat !== 1 && total >= ac);
+        const dd = parseDice(chk.dmg, s.level) || parseDice('1d6');
+        let dmg = 0;
+        if (hit) { dmg = Math.max(1, rollDice(dd, { crit }).total); s.hp = Math.max(0, s.hp - dmg); }
+        const who = chk.enemy || 'The enemy';
+        const label = crit ? 'Critical Hit' : hit ? 'Hit' : 'Miss';
+        const down = s.hp === 0 ? ` ${s.name} is at 0 HP and falls unconscious/dying.` : '';
+        return {
+            kind: 'defend', nat, total, dice: [dice.a, dice.b], adv, outcome: crit ? 'critfail' : hit ? 'fail' : 'success',
+            title: `${who} attacks you`, why: String(chk.why || '').slice(0, 80), label,
+            line: `d20 ${nat} ${fmtMod(atk + mod)} = ${total} vs your AC ${ac}${hit ? ` · you take ${dmg}` : ''} · HP ${s.hp}/${s.hpMax}`,
+            text: `${who} attacks ${s.name}: d20 ${nat} ${fmtMod(atk + mod)} = ${total} vs AC ${ac} — ${label.toUpperCase()}${hit ? `, ${dmg} damage taken (already applied by the game; HP ${s.hp}/${s.hpMax})` : ''}.${down}`,
+        };
+    }
+
     function checkBlock(s) {
-        const sheet = s.skills.length ? s.skills.map((k) => `${k.name} +${k.rank}`).join(', ') : 'none (all checks are +0)';
+        const sheet = s.skills.length ? s.skills.map((k) => `${k.name} ${fmtMod(skillBonus(s, k))}`).join(', ') : 'none (all checks are +0)';
         return `
 
 [Checks — the player rolls their own dice]
 When the player's action has real uncertainty AND a meaningful consequence for failing (an attack, sneaking past someone, persuading a resistant NPC, climbing, picking a lock, casting under pressure…), do NOT decide the outcome yourself. Narrate up to the moment of the attempt, STOP there, and request one check by putting it inside the SAME hidden tag you always append at the very end of the reply, e.g.
 <!--OGT:{"check":{"skill":"Stealth","dc":15,"mod":0,"adv":0,"why":"slip past the guards"}}-->
 The check must live ONLY inside that hidden <!--OGT:…--> comment. Never write it (or any JSON, "check:" or "dc") as visible text in the story.
-- Pick the best-fitting skill from the player's sheet (bonus = its rank; no fitting skill = +0). Player skills: ${sheet}.
+- Pick the best-fitting skill from the player's sheet (the bonus already includes its governing ability; no fitting skill = +0). Player skills: ${sheet}.
 - DC: 8 easy, 12 routine, 15 moderate, 18 hard, 22 heroic. For strong situational factors add "mod" (-5..+5) and "adv":1 (advantage) / -1 (disadvantage).
 - The player then clicks to roll. You will receive the result — either as a [ROLL RESULT] block or a player message beginning with [ROLL] — giving the total, the DC and the outcome (Critical Success, Strong Success, Success, Failure, Bad Failure or Critical Failure). Narrate EXACTLY that outcome honestly and let it matter; never ask for the same check again. If a result has no DC, judge the total against a fair DC for what they attempted.
-- Safe, trivial or purely conversational actions need no check — just narrate. At most one check per turn. Never state the dice numbers in your narration.`;
+- Safe, trivial or purely conversational actions need no check — just narrate. At most one check per turn. Never state the dice numbers in your narration.
+
+[Combat — the game resolves every attack and tracks enemy HP]
+- Register each enemy the moment it appears, with sensible stats: <!--OGT:{"enemies":{"add":[{"name":"Goblin","hp":9,"ac":13}]}}-->. Typical AC: 10 unarmored, 12 light armor, 14 armored, 16+ heavy. Use "enemies":{"clear":true} when the fight ends.
+- When the PLAYER attacks (a weapon strike or a damaging spell), stop and request: "check":{"kind":"attack","target":"Goblin","ac":13,"why":"stab the goblin"} (for a spell add "spell":true,"dmg":"1d8" and report the mana cost as a negative "mana"). The game rolls the hit and damage with their real weapon and applies it to that enemy.
+- When an ENEMY attacks the player, stop and request: "check":{"kind":"defend","enemy":"Goblin","atk":4,"dmg":"1d6+1","why":"slashes at you"} (atk +2..+8, dmg by threat). The game rolls against the player's AC and applies the damage to their HP itself — NEVER also report "hp" for combat damage.
+- The result tells you hit/miss, damage dealt and the enemy's remaining HP. Narrate it exactly; a DEFEATED enemy is dead or out of the fight. Skill checks stay "kind":"skill" (or omit kind). One check per turn, so run a fight one attack at a time.
+- Never invent the player's gear: they carry only what the sheet's "gear" lists. Give loot/purchases with "inv.add" (and "inv.remove" when something is used up), never in prose alone.`;
     }
 
     function diceBlock(s) {
         if (!settings().dice) return '';
         if (settings().rollMode === 'manual') return checkBlock(s);
         if (!pendingRoll) return '';
-        const sheet = s.skills.length ? s.skills.map((k) => `${k.name} +${k.rank}`).join(', ') : 'none (all checks are +0)';
+        const sheet = s.skills.length ? s.skills.map((k) => `${k.name} ${fmtMod(skillBonus(s, k))}`).join(', ') : 'none (all checks are +0)';
         return `
 
 [Dice — rolled by the game for this turn. Do not reroll, invent or alter them.]
@@ -554,6 +786,16 @@ When the player's action has real uncertainty AND a meaningful consequence for f
     }
 
     function rollHtml(r, kind = 'roll', sig = JSON.stringify(r)) {
+        if (r.kind === 'attack' || r.kind === 'defend') {
+            return `<div class="ogt-roll ogt-card out-${r.outcome}" data-kind="${kind}" data-sig="${esc(sig)}">
+                <div class="ogt-die">${r.nat}</div>
+                <div class="ogt-roll-main">
+                    <div class="ogt-roll-title">${esc(r.title)}${r.why ? `<span> · ${esc(r.why)}</span>` : ''}</div>
+                    <div class="ogt-roll-math">${esc(r.line)}</div>
+                </div>
+                <div class="ogt-roll-out">${esc(r.label)}</div>
+            </div>`;
+        }
         const sign = (n) => (n >= 0 ? `+ ${n}` : `− ${Math.abs(n)}`);
         const diceTxt = r.adv ? `d20 [${r.dice[0]}, ${r.dice[1]}] → ${r.nat} (${r.adv > 0 ? 'adv' : 'dis'})` : `d20 ${r.nat}`;
         const parts = [diceTxt, `${sign(r.bonus)} ${r.trained ? 'skill' : 'untrained'}`];
@@ -601,13 +843,21 @@ When the player's action has real uncertainty AND a meaningful consequence for f
     function checkHtml(k, live, sig) {
         const sign = (n) => (n >= 0 ? `+${n}` : `−${Math.abs(n)}`);
         const extra = [k.mod ? `${sign(k.mod)} situation` : '', k.adv ? (k.adv > 0 ? 'advantage' : 'disadvantage') : ''].filter(Boolean).join(' · ');
+        let title, math, btn;
+        if (k.kind === 'attack') {
+            title = `Attack · ${k.target}`; math = `${sign(k.bonus + k.mod)} to hit · AC ${k.ac}${k.spell ? ' · spell' : ''}`; btn = 'Roll attack';
+        } else if (k.kind === 'defend') {
+            title = `${k.enemy} attacks you`; math = `${sign(k.atk + k.mod)} to hit · your AC ${computeAC(getState())}`; btn = 'Defend';
+        } else {
+            title = `${k.skill} check`; math = `${sign(k.bonus)} ${k.trained ? 'skill' : 'untrained'}${extra ? ' · ' + extra : ''} · DC ${k.dc}`; btn = 'Roll d20';
+        }
         return `<div class="ogt-roll ogt-card ogt-check" data-kind="check" data-sig="${esc(sig)}">
             <div class="ogt-die">d20</div>
             <div class="ogt-roll-main">
-                <div class="ogt-roll-title">${esc(k.skill)} check${k.why ? `<span> · ${esc(k.why)}</span>` : ''}</div>
-                <div class="ogt-roll-math">${sign(k.bonus)} ${k.trained ? 'skill' : 'untrained'}${extra ? ' · ' + extra : ''} · DC ${k.dc}</div>
+                <div class="ogt-roll-title">${esc(title)}${k.why ? `<span> · ${esc(k.why)}</span>` : ''}</div>
+                <div class="ogt-roll-math">${esc(math)}</div>
             </div>
-            <button class="ogt-check-btn" ${live ? '' : 'disabled'}>${live ? 'Roll d20' : 'Expired'}</button>
+            <button class="ogt-check-btn" ${live ? '' : 'disabled'}>${live ? btn : 'Expired'}</button>
         </div>`;
     }
 
@@ -659,6 +909,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
 
     const OUTCOME_TXT = { ...OUTCOMES };
     function rollMessage(res, label) {
+        if (res.text) return `[ROLL] ${res.text}`;
         const bonus = res.bonus ? ` ${res.bonus >= 0 ? '+' : '−'} ${Math.abs(res.bonus)} ${res.trained ? 'skill' : ''}`.trimEnd() : '';
         const mod = res.mod ? ` ${res.mod >= 0 ? '+' : '−'} ${Math.abs(res.mod)} situation` : '';
         const die = res.adv ? `d20 [${res.dice[0]}, ${res.dice[1]}] → ${res.nat} (${res.adv > 0 ? 'advantage' : 'disadvantage'})` : `d20 ${res.nat}`;
@@ -682,10 +933,15 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         await new Promise((r) => setTimeout(r, 750));
         clearInterval(spin);
 
-        const res = resolveRoll(chk, { a: d20(), b: d20() }, getState());
+        const state = getState();
+        const dice = { a: d20(), b: d20() };
+        const res = chk.kind === 'attack' ? resolveAttack(chk, dice, state)
+            : chk.kind === 'defend' ? resolveDefend(chk, dice, state)
+                : resolveRoll(chk, dice, state);
         chk.result = res;
         rolling = false;
-        c.saveChat?.();
+        if (chk.kind === 'attack' || chk.kind === 'defend') persist({ manual: true }); // enemy / player HP changed
+        else c.saveChat?.();
         decorateRolls();
         deliverRoll(rollMessage(res, `${res.skill} check${chk.why ? ` (${chk.why})` : ''}`));
     }
@@ -694,8 +950,9 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
     function quickRoll(skill) {
         if (isGenerating()) return window.toastr?.info('Wait for the reply to finish first.', "Old Greg's Tavern");
         const nat = d20();
-        const res = { skill: skill.name, trained: true, bonus: skill.rank, mod: 0, adv: 0, dice: [nat, nat], nat, total: nat + skill.rank, dc: null, outcome: null };
-        window.toastr?.info(`${skill.name}: d20 ${nat} + ${skill.rank} = ${res.total}`, '🎲 Roll');
+        const bonus = skillBonus(getState(), skill);
+        const res = { skill: skill.name, trained: true, bonus, mod: 0, adv: 0, dice: [nat, nat], nat, total: nat + bonus, dc: null, outcome: null };
+        window.toastr?.info(`${skill.name}: d20 ${nat} ${fmtMod(bonus)} = ${res.total}`, '🎲 Roll');
         const text = rollMessage(res, `${skill.name} (rolled on my own initiative)`);
         const c = ctx();
         const last = c.chat[c.chat.length - 1];
@@ -725,6 +982,31 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
     ];
     const presetDesc = (n) => PRESET_SKILLS.find(([p]) => p === n)?.[1] || '';
 
+    // Standard array (15,14,13,12,10,8) assigned per class, plus a starting kit. `eq` = starts equipped.
+    const POTION = { name: 'Healing Potion', type: 'potion', heal: '2d4+2' };
+    const CLASS_KIT = {
+        warrior: { stats: { str: 15, dex: 13, con: 14, int: 8, wis: 12, cha: 10 }, gold: 15, gear: [
+            { name: 'Longsword', type: 'weapon', dmg: '1d8', ability: 'str', eq: 1 }, { name: 'Chain Shirt', type: 'armor', ac: 14, eq: 1 },
+            { name: 'Shield', type: 'shield', ac: 2, eq: 1 }, { ...POTION, qty: 2 }] },
+        rogue: { stats: { str: 8, dex: 15, con: 13, int: 12, wis: 10, cha: 14 }, gold: 20, gear: [
+            { name: 'Shortsword', type: 'weapon', dmg: '1d6', ability: 'dex', eq: 1 }, { name: 'Dagger', type: 'weapon', dmg: '1d4', ability: 'dex' },
+            { name: 'Leather Armor', type: 'armor', ac: 11, eq: 1 }, { ...POTION, qty: 2 }, { name: "Thieves' Tools", type: 'misc', desc: 'Picks and probes.' }] },
+        mage: { stats: { str: 8, dex: 13, con: 14, int: 15, wis: 12, cha: 10 }, gold: 25, gear: [
+            { name: 'Quarterstaff', type: 'weapon', dmg: '1d6', ability: 'str', eq: 1 }, { ...POTION, qty: 1 },
+            { name: 'Mana Potion', type: 'potion', mana: '1d6+2' }, { name: 'Spellbook', type: 'misc', desc: 'Your spells, in your own hand.' }] },
+        cleric: { stats: { str: 13, dex: 10, con: 14, int: 8, wis: 15, cha: 12 }, gold: 10, gear: [
+            { name: 'Mace', type: 'weapon', dmg: '1d6', ability: 'str', eq: 1 }, { name: 'Scale Mail', type: 'armor', ac: 14, eq: 1 },
+            { name: 'Shield', type: 'shield', ac: 2, eq: 1 }, { ...POTION, qty: 2 }, { name: 'Holy Symbol', type: 'misc' }] },
+        ranger: { stats: { str: 12, dex: 15, con: 13, int: 10, wis: 14, cha: 8 }, gold: 15, gear: [
+            { name: 'Shortbow', type: 'weapon', dmg: '1d6', ability: 'dex', eq: 1 }, { name: 'Shortsword', type: 'weapon', dmg: '1d6', ability: 'dex' },
+            { name: 'Leather Armor', type: 'armor', ac: 11, eq: 1 }, { ...POTION, qty: 2 }] },
+        bard: { stats: { str: 8, dex: 14, con: 13, int: 12, wis: 10, cha: 15 }, gold: 30, gear: [
+            { name: 'Rapier', type: 'weapon', dmg: '1d8', ability: 'dex', eq: 1 }, { name: 'Leather Armor', type: 'armor', ac: 11, eq: 1 },
+            { ...POTION, qty: 1 }, { name: 'Lute', type: 'misc', desc: 'Well worn, well loved.' }] },
+        deathknight: { stats: { str: 15, dex: 8, con: 14, int: 13, wis: 12, cha: 10 }, gold: 5, gear: [
+            { name: 'Greatsword', type: 'weapon', dmg: '2d6', ability: 'str', eq: 1 }, { name: 'Plate Armor', type: 'armor', ac: 16, eq: 1 }, { ...POTION, qty: 1 }] },
+    };
+
     let cc = null; // creator wizard state
 
     function openCreator() {
@@ -750,6 +1032,8 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
                 <div class="cc-class ${c.id === cc.classId ? 'sel' : ''}" data-cc-act="pick" data-id="${c.id}">
                     <div class="cc-cname">${esc(c.name)}</div><div class="cc-tag">${esc(c.tag)}</div>
                     <div class="cc-stats"><b>${c.hp}</b> HP · <b>${c.mana}</b> Mana</div>
+                    <div class="cc-skills">${ABILITIES.map((a) => `${AB_NAME[a]} ${CLASS_KIT[c.id].stats[a]}`).join(' · ')}</div>
+                    <div class="cc-skills">${CLASS_KIT[c.id].gear.filter((g) => g.eq).map((g) => esc(g.name)).join(', ')}</div>
                     <div class="cc-skills">${c.skills.map(([n, r]) => `${esc(n)} ${r}`).join(' · ')}</div>
                 </div>`).join('')}</div>
                 ${cls ? `<div class="cc-traits"><b>${esc(cls.name)}:</b> ${esc(cls.traits)}</div>` : ''}`;
@@ -787,7 +1071,12 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
             traits: cls.traits, growth: { hp: cls.grow[0], mana: cls.grow[1] },
             level: 1, xp: 0, hp: cls.hp, hpMax: cls.hp, mana: cls.mana, manaMax: cls.mana,
             skills: [], skillPoints: 0, created: true,
+            stats: { ...(CLASS_KIT[cls.id]?.stats || s.stats) }, statPoints: 0, inv: [], gold: CLASS_KIT[cls.id]?.gold ?? 0, enemies: [],
         });
+        for (const spec of CLASS_KIT[cls.id]?.gear || []) {
+            const it = addItem(s, spec);
+            if (it && spec.eq) it.equipped = true;
+        }
         for (const [n, r] of cls.skills) addSkill(s, n, presetDesc(n), { base: r });
         if (cc.bonus) addSkill(s, cc.bonus, presetDesc(cc.bonus), { base: 1 });
         closeCreator();
@@ -817,7 +1106,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
             <div class="ogt-skill-head"><span class="ogt-skill-name">${esc(k.name)}</span>
                 <span class="ogt-quest-btns"><button class="ogt-btn small" data-ogt-act="skill-roll" title="Roll ${esc(k.name)} (d20 + ${k.rank})">🎲</button><button class="ogt-btn small" data-ogt-act="skill-up" ${canUp ? '' : 'disabled'} title="Costs ${cost} point${cost > 1 ? 's' : ''}">${k.rank >= max ? 'MAX' : `+ ${cost}`}</button>
                 <button class="ogt-btn small" data-ogt-act="skill-del" title="Forget (refunds points)">✕</button></span></div>
-            <div class="ogt-pips">${pips}<span class="ogt-xpchip">${esc(RANK_NAMES[k.rank] || '')}</span></div>
+            <div class="ogt-pips">${pips}<span class="ogt-xpchip">${esc(RANK_NAMES[k.rank] || '')} · ${fmtMod(skillBonus(getState(), k))}${abilityOf(k) ? ` (${AB_NAME[abilityOf(k)]})` : ''}</span></div>
             ${k.desc ? `<div class="ogt-quest-desc">${esc(k.desc)}</div>` : ''}
         </div>`;
     }
@@ -835,9 +1124,66 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
             h += `<div class="ogt-section">LEARN A SKILL (1 POINT)</div><div class="ogt-chips">${left.map(([n, d]) => `<button class="ogt-chip" data-ogt-act="skill-preset" data-name="${esc(n)}" data-desc="${esc(d)}" ${pts < 1 ? 'disabled' : ''} title="${esc(d)}">${esc(n)}</button>`).join('')}</div>`;
         }
         h += `<div class="ogt-form"><input id="ogt-new-sk" placeholder="Custom skill name"><input id="ogt-new-skd" placeholder="What it covers (optional)">
+            <select id="ogt-new-skab"><option value="">No ability bonus</option>${ABILITIES.map((a) => `<option value="${a}">Uses ${AB_NAME[a]}</option>`).join('')}</select>
             <button class="ogt-btn ogt-wide" data-ogt-act="skill-add" ${pts < 1 ? 'disabled' : ''}>Learn custom skill</button>
             ${s.skills.length ? `<button class="ogt-btn ogt-wide danger" data-ogt-act="skill-respec">Respec all skills</button>` : ''}</div>`;
         return h;
+    }
+
+    // ── gear tab ──
+    function itemBadge(i) {
+        if (i.type === 'weapon') return `${i.dmg}${i.bonus ? ` +${i.bonus}` : ''} · ${AB_NAME[i.ability]}`;
+        if (i.type === 'armor') return `AC ${i.ac}${i.dexCap == null ? ' + DEX' : i.dexCap === 0 ? '' : ` + DEX (max ${i.dexCap})`}`;
+        if (i.type === 'shield') return `+${i.ac} AC`;
+        return [i.heal ? `heals ${i.heal}` : '', i.mana ? `mana ${i.mana}` : ''].filter(Boolean).join(' · ');
+    }
+
+    function itemHtml(i) {
+        const equippable = ['weapon', 'armor', 'shield'].includes(i.type);
+        const usable = i.type === 'potion' || i.type === 'consumable';
+        return `<div class="ogt-item ${i.equipped ? 'eq' : ''}" data-iid="${esc(i.id)}" data-itype="${esc(i.type)}">
+            <div class="ogt-item-head"><span class="ogt-item-name">${esc(i.name)}${i.qty > 1 ? ` <i>×${i.qty}</i>` : ''}</span>
+                <span class="ogt-quest-btns">
+                    ${equippable ? `<button class="ogt-btn small" data-ogt-act="item-equip">${i.equipped ? 'Unequip' : 'Equip'}</button>` : ''}
+                    ${usable ? `<button class="ogt-btn small" data-ogt-act="item-use">Use</button>` : ''}
+                    <button class="ogt-btn small" data-ogt-act="item-drop" title="Drop one">✕</button></span></div>
+            <div class="ogt-item-meta"><span class="ogt-badge d-${i.type === 'weapon' ? 'hard' : i.type === 'potion' ? 'easy' : i.type === 'misc' ? 'trivial' : 'medium'}">${esc(i.type)}</span>
+                <span class="ogt-xpchip">${esc(itemBadge(i))}</span></div>
+            ${i.desc ? `<div class="ogt-quest-desc">${esc(i.desc)}</div>` : ''}
+        </div>`;
+    }
+
+    function renderGear(s) {
+        const w = equippedOf(s, 'weapon'), a = equippedOf(s, 'armor'), sh = equippedOf(s, 'shield');
+        const dex = amod(s.stats.dex);
+        let h = `<div class="ogt-points has"><span>${computeAC(s)}</span> Armor Class
+            <small>${a ? esc(a.name) : 'no armor'} ${a ? '' : '(10'} + DEX ${fmtMod(a && a.dexCap != null ? Math.min(dex, a.dexCap) : dex)}${sh ? ` + ${esc(sh.name)} ${sh.ac}` : ''}${a ? '' : ')'}</small></div>
+            <div class="ogt-acrow">Weapon: <b>${w ? `${esc(w.name)} ${w.dmg}${w.bonus ? ` +${w.bonus}` : ''}` : 'unarmed 1d2'}</b> · Attack <b>${fmtMod(attackProfile(s).bonus)}</b></div>
+            <label class="ogt-field ogt-inline">Gold<input data-ogt-field="gold" type="number" min="0" value="${s.gold}"></label>`;
+        const eq = s.inv.filter((i) => i.equipped), pack = s.inv.filter((i) => !i.equipped);
+        h += `<div class="ogt-section">EQUIPPED</div>${eq.length ? eq.map(itemHtml).join('') : '<div class="ogt-empty">Nothing equipped.</div>'}`;
+        h += `<div class="ogt-section">PACK</div>${pack.length ? pack.map(itemHtml).join('') : '<div class="ogt-empty">Your pack is empty.</div>'}`;
+        h += `<div class="ogt-form"><input id="ogt-new-it" placeholder="Add item name"><select id="ogt-new-ittype">${ITEM_TYPES.map((t) => `<option value="${t}">${t}</option>`).join('')}</select>
+            <input id="ogt-new-itstat" placeholder="Stat: weapon dice (1d8), armor AC (14), potion heal (2d4+2)">
+            <button class="ogt-btn ogt-wide" data-ogt-act="item-add">Add item</button></div>`;
+        return h;
+    }
+
+    // ── notes: small things that happened in the UI (drank a potion, switched weapon) that the narrator should know next turn ──
+    function pushNote(text) {
+        const c = ctx();
+        const last = c.chat[c.chat.length - 1];
+        if (!last) return;
+        last.extra = last.extra || {};
+        last.extra.ogt_notes = [...(last.extra.ogt_notes || []), { t: text, done: false }];
+        c.saveChat?.();
+    }
+    function notesBlock() {
+        const notes = (ctx().chat || []).flatMap((m) => (m.extra?.ogt_notes || []).filter((n) => !n.done).map((n) => n.t));
+        return notes.length ? `
+
+[Game notes — the player did this through the game UI since your last reply; acknowledge it naturally, don't repeat exact numbers]
+${notes.map((t) => '- ' + t).join('\n')}` : '';
     }
 
     function renderGM() {
@@ -890,7 +1236,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (active && panel.contains(active) && /INPUT|TEXTAREA/.test(active.tagName) && active.type !== 'range' && active.type !== 'checkbox') return; // don't clobber typing
         const body = panel.querySelector('.ogt-body');
         const scroll = body.scrollTop;
-        body.innerHTML = activeTab === 'character' ? renderCharacter(state) : activeTab === 'quests' ? renderQuests(state) : activeTab === 'skills' ? renderSkills(state) : renderGM();
+        body.innerHTML = activeTab === 'character' ? renderCharacter(state) : activeTab === 'quests' ? renderQuests(state) : activeTab === 'skills' ? renderSkills(state) : activeTab === 'gear' ? renderGear(state) : renderGM();
         body.scrollTop = scroll;
     }
 
@@ -936,8 +1282,9 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
 
         const state = getState();
         const act = target.dataset.ogtAct;
-        const root = target.closest('[data-rel],[data-qid],[data-sid]');
+        const root = target.closest('[data-rel],[data-qid],[data-sid],[data-iid],[data-eid]');
         const skill = root?.dataset.sid ? state.skills.find((k) => k.id === root.dataset.sid) : null;
+        const item = root?.dataset.iid ? state.inv.find((i) => i.id === root.dataset.iid && i.type === root.dataset.itype) : null;
         const maxRank = num(settings().skillMaxRank, 5);
         const relName = root?.dataset.rel;
         const q = root?.dataset.qid ? state.quests.find((x) => x.id === root.dataset.qid) : null;
@@ -974,6 +1321,46 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             case 'q-del': state.quests = state.quests.filter((x) => x !== q); return persist({ manual: true });
             case 'open-creator': return openCreator();
             case 'goto-skills': activeTab = 'skills'; return render();
+            case 'stat-up': {
+                const ab = target.dataset.ab;
+                if (!ABILITIES.includes(ab) || state.statPoints < 1 || state.stats[ab] >= 20) return;
+                state.statPoints -= 1; state.stats[ab] += 1;
+                return persist({ manual: true });
+            }
+            case 'item-equip': {
+                if (!item) return;
+                if (item.equipped) item.equipped = false;
+                else { state.inv.forEach((i) => { if (i.type === item.type) i.equipped = false; }); item.equipped = true; }
+                pushNote(`${state.name} ${item.equipped ? 'equipped' : 'put away'} ${item.name} (AC is now ${computeAC(state)}).`);
+                return persist({ manual: true });
+            }
+            case 'item-use': {
+                if (!item) return;
+                const name = item.name, parts = [];
+                if (item.heal) { const before = state.hp; state.hp = Math.min(state.hpMax, state.hp + rollDice(parseDice(item.heal)).total); parts.push(`restored ${state.hp - before} HP`); }
+                if (item.mana) { const before = state.mana; state.mana = Math.min(state.manaMax, state.mana + rollDice(parseDice(item.mana)).total); parts.push(`restored ${state.mana - before} mana`); }
+                removeItem(state, name, 1);
+                const text = `${state.name} used ${name}${parts.length ? ': ' + parts.join(', ') : ''} (HP ${state.hp}/${state.hpMax}, Mana ${state.mana}/${state.manaMax}).`;
+                pushNote(text);
+                window.toastr?.success(text, "Old Greg's Tavern");
+                return persist({ manual: true });
+            }
+            case 'item-drop': if (item) { removeItem(state, item.name, 1); pushNote(`${state.name} discarded ${item.name}.`); } return persist({ manual: true });
+            case 'item-add': {
+                const name = document.getElementById('ogt-new-it').value.trim();
+                if (!name) return;
+                const type = document.getElementById('ogt-new-ittype').value;
+                const stat = document.getElementById('ogt-new-itstat').value.trim();
+                const spec = { name, type };
+                if (type === 'weapon') spec.dmg = stat || '1d6';
+                else if (type === 'armor' || type === 'shield') spec.ac = num(stat, type === 'shield' ? 2 : 11);
+                else if (type === 'potion' || type === 'consumable') { spec.heal = stat; }
+                addItem(state, spec);
+                document.getElementById('ogt-new-it').value = ''; document.getElementById('ogt-new-itstat').value = '';
+                return persist({ manual: true });
+            }
+            case 'foe-del': state.enemies = state.enemies.filter((e) => e.id !== root?.dataset.eid); return persist({ manual: true });
+            case 'foes-clear': state.enemies = []; return persist({ manual: true });
             case 'skill-roll': if (skill) quickRoll(skill); return;
             case 'skill-up': {
                 if (!skill || skill.rank >= maxRank) return;
@@ -993,7 +1380,8 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
                 if (state.skillPoints < 1) return;
                 const name = act === 'skill-preset' ? target.dataset.name : document.getElementById('ogt-new-sk').value.trim();
                 const desc = act === 'skill-preset' ? target.dataset.desc : document.getElementById('ogt-new-skd').value.trim();
-                if (!name || !addSkill(state, name, desc)) return;
+                const ability = act === 'skill-add' ? document.getElementById('ogt-new-skab')?.value : null;
+                if (!name || !addSkill(state, name, desc, { ability })) return;
                 state.skillPoints -= 1;
                 return persist({ manual: true });
             }
@@ -1028,6 +1416,10 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             }
             ctx().chatMetadata.ogt_base = clone(state);
             ctx().saveMetadata(); refreshPrompt();
+        } else if (el.dataset.ogtStat) {
+            state.stats[el.dataset.ogtStat] = clamp(Math.round(num(el.value, 10)), 1, 30);
+            ctx().chatMetadata.ogt_base = clone(state);
+            ctx().saveMetadata(); refreshPrompt();
         } else if (el.dataset.ogtRelRange) {
             state.rel[el.dataset.ogtRelRange].value = num(el.value);
             const foot = el.parentElement.querySelector('.ogt-rel-foot span'); if (foot) foot.textContent = el.value;
@@ -1050,7 +1442,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
     function onChange(e) {
         const el = e.target;
         if (el.dataset.ogtSetting) { render(); return; }
-        if (el.dataset.ogtRelRange || el.dataset.ogtField) persist({ manual: true });
+        if (el.dataset.ogtRelRange || el.dataset.ogtField || el.dataset.ogtStat) persist({ manual: true });
     }
 
     // ───────────────────────── boot ─────────────────────────
@@ -1066,6 +1458,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
                         <button class="ogt-tab" data-tab="character">Character</button>
                         <button class="ogt-tab" data-tab="quests">Quests</button>
                         <button class="ogt-tab" data-tab="skills">Skills</button>
+                        <button class="ogt-tab" data-tab="gear">Gear</button>
                         <button class="ogt-tab" data-tab="gm">GM</button>
                     </div>
                     <button id="ogt-close" title="Hide">‹</button>

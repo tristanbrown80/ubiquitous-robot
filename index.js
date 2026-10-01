@@ -38,6 +38,7 @@
         rollMode: 'manual', // manual = the model asks, you click to roll | auto = the game rolls for you before each reply
         showRollMsg: false, // false = the result is passed to the narrator silently; true = posted as a visible [ROLL] message
         collapseMenu: true,
+        luckRerolls: true,
     };
 
     // base XP by quest difficulty — the model only picks the difficulty, the extension pays out
@@ -90,6 +91,7 @@
             skills: [], skillPoints: 0,
             stats: { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 }, statPoints: 0,
             inv: [], gold: 0, enemies: [],
+            luck: 1, luckMax: 3,
         };
     }
 
@@ -106,6 +108,8 @@
         if (!Array.isArray(o.inv)) o.inv = [];
         if (!Number.isFinite(o.gold)) o.gold = 0;
         if (!Array.isArray(o.enemies)) o.enemies = [];
+        if (!Number.isFinite(o.luckMax)) o.luckMax = 3;
+        if (!Number.isFinite(o.luck)) o.luck = 1;
         return o;
     }
 
@@ -277,6 +281,13 @@
 
     // ───────────────────────── applying model updates ─────────────────────────
 
+    /** +1 Luck (capped). Earned from quests, level-ups and rare inspired play. */
+    function gainLuck(s, notes, why) {
+        if (!settings().luckRerolls || s.luck >= s.luckMax) return;
+        s.luck += 1;
+        notes.push(['info', `🍀 +1 Luck (${why})`]);
+    }
+
     /** Add XP (scaled by the XP multiplier unless raw) and process level-ups. */
     function gainXp(s, amount, notes, label = '') {
         const gained = Math.round(amount * num(settings().xpMult, 1));
@@ -290,6 +301,7 @@
             s.hp = s.hpMax; s.mana = s.manaMax;
             const pts = Math.max(0, Math.round(num(settings().pointsPerLevel, 2)));
             s.skillPoints = (s.skillPoints || 0) + pts;
+            gainLuck(s, notes, 'level up');
             const asi = s.level % 2 === 0; // an ability point every even level
             if (asi) s.statPoints = (s.statPoints || 0) + 1;
             notes.push(['success', `Level up! ${s.name} is now level ${s.level}.${pts ? ` +${pts} skill points.` : ''}${asi ? ' +1 ability point.' : ''}`]);
@@ -304,6 +316,7 @@
         if (q.status === 'done') return;
         q.status = 'done';
         notes.push(['success', `Quest complete: ${q.title}`]);
+        if (!q.awarded) gainLuck(s, notes, 'quest complete');
         if (!q.awarded) {
             q.awarded = true;
             const rest = Math.max(0, questReward(q) - num(q.paid, 0));
@@ -325,6 +338,9 @@
             else if (mode === 'mixed') gainXp(s, clamp(num(d.xp), 0, MIXED_CAP), notes);
             // 'quests' mode: loose XP from the model is ignored
         }
+
+        // the narrator may reward genuinely inspired roleplay with 1 Luck (rarely; capped at +1 per reply)
+        if (d.luck > 0) gainLuck(s, notes, 'inspired play');
 
         // loot, purchases, used-up items, gold (items are normalised/capped by normItem)
         if (d.inv && typeof d.inv === 'object') {
@@ -523,6 +539,7 @@
             skills: Object.fromEntries((s.skills || []).map((k) => [k.name, `${fmtMod(skillBonus(s, k))} (rank ${k.rank}/${settings().skillMaxRank} ${RANK_NAMES[k.rank] || ''})`])),
             abilities: Object.fromEntries(ABILITIES.map((a) => [AB_NAME[a], `${s.stats[a]} (${fmtMod(amod(s.stats[a]))})`])),
             armor_class: computeAC(s),
+            luck: settings().luckRerolls ? `${s.luck}/${s.luckMax}` : undefined,
             gear: {
                 weapon: (() => { const w = equippedOf(s, 'weapon'); return w ? `${w.name} (${w.dmg}${w.bonus ? ` +${w.bonus}` : ''}, ${AB_NAME[w.ability]})` : 'unarmed'; })(),
                 armor: equippedOf(s, 'armor')?.name || 'none', shield: equippedOf(s, 'shield')?.name || 'none',
@@ -595,7 +612,7 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
         <div class="ogt-abilities">${ABILITIES.map((a) => `<div class="ogt-ab" title="${AB_NAME[a]} ${s.stats[a]}">
             <div class="n">${AB_NAME[a]}</div><div class="v">${s.stats[a]}</div><div class="m">${fmtMod(amod(s.stats[a]))}</div>
             ${s.statPoints > 0 && s.stats[a] < 20 ? `<button data-ogt-act="stat-up" data-ab="${a}" title="Spend an ability point">+</button>` : ''}</div>`).join('')}</div>
-        <div class="ogt-acrow">AC <b>${computeAC(s)}</b> · Proficiency <b>${fmtMod(profBonus(s.level))}</b> · <b>${s.gold}</b> gold${s.statPoints > 0 ? ` · <span class="pts">${s.statPoints} ability point${s.statPoints === 1 ? '' : 's'}</span>` : ''}</div>`;
+        <div class="ogt-acrow">AC <b>${computeAC(s)}</b> · Proficiency <b>${fmtMod(profBonus(s.level))}</b> · <b>${s.gold}</b> gold${settings().luckRerolls ? ` · <span class="luck" title="Spend Luck to reroll a failed check">🍀 <b>${s.luck}/${s.luckMax}</b></span>` : ''}${s.statPoints > 0 ? ` · <span class="pts">${s.statPoints} ability point${s.statPoints === 1 ? '' : 's'}</span>` : ''}</div>`;
 
         const foes = s.enemies.filter((e) => !e.defeated);
         if (s.enemies.length) {
@@ -626,7 +643,7 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
             h += `<div class="ogt-form">
                 ${field('name', 'Name', 'text')}${field('class', 'Class', 'text')}${field('avatar', 'Portrait URL', 'text')}
                 ${field('level', 'Level')}${field('xp', 'XP')}
-                ${field('hp', 'HP')}${field('hpMax', 'Max HP')}${field('mana', 'Mana')}${field('manaMax', 'Max mana')}
+                ${field('hp', 'HP')}${field('hpMax', 'Max HP')}${field('mana', 'Mana')}${field('manaMax', 'Max mana')}${field('luck', 'Luck')}${field('luckMax', 'Max luck')}
                 ${ABILITIES.map((a) => `<label>${AB_NAME[a]}<input data-ogt-stat="${a}" type="number" min="1" max="30" value="${s.stats[a]}"></label>`).join('')}
             </div>`;
         }
@@ -782,7 +799,7 @@ The check must live ONLY inside that hidden <!--OGT:…--> comment. Never write 
 - Pick the best-fitting skill from the player's sheet (the bonus already includes its governing ability). Player skills: ${sheet}. If none fits, omit "skill" and give "ability":"str|dex|con|int|wis|cha" for a raw ability check (bonus = that ability's modifier); with neither it is +0.
 - DC: 8 easy, 12 routine, 15 moderate, 18 hard, 22 heroic. For strong situational factors add "mod" (-5..+5) and "adv":1 (advantage) / -1 (disadvantage).
 - The player then clicks to roll. You will receive the result — either as a [ROLL RESULT] block or a player message beginning with [ROLL] — giving the total, the DC and the outcome (Critical Success, Strong Success, Success, Failure, Bad Failure or Critical Failure). Narrate EXACTLY that outcome honestly and let it matter; never ask for the same check again. If a result has no DC, judge the total against a fair DC for what they attempted.
-- Safe, trivial or purely conversational actions need no check — just narrate. At most one check per turn. Never state the dice numbers in your narration.
+- Safe, trivial or purely conversational actions need no check — just narrate. At most one check per turn. Never state the dice numbers in your narration.${settings().luckRerolls ? '\n- Luck: the player may spend a Luck point to reroll a FAILED check before you narrate it; you only ever receive the final result (a note says if it was rerolled). Do not offer or mention rerolls yourself. Very rarely — for genuinely inspired roleplay or a heroic gamble — you may grant 1 Luck by adding "luck":1 to the tag.' : ''}
 
 ${SOCIAL_RULES}
 
@@ -813,15 +830,16 @@ When the player's action has real uncertainty AND a meaningful consequence for f
 ${SOCIAL_RULES}`;
     }
 
-    function rollHtml(r, kind = 'roll', sig = JSON.stringify(r)) {
+    function rollHtml(r, kind = 'roll', sig = JSON.stringify(r), actions = '') {
+        const reTxt = r.rerolled != null ? ` · 🍀 rerolled (was ${r.rerolled})` : '';
         if (r.kind === 'attack' || r.kind === 'defend') {
             return `<div class="ogt-roll ogt-card out-${r.outcome}" data-kind="${kind}" data-sig="${esc(sig)}">
                 <div class="ogt-die">${r.nat}</div>
                 <div class="ogt-roll-main">
                     <div class="ogt-roll-title">${esc(r.title)}${r.why ? `<span> · ${esc(r.why)}</span>` : ''}</div>
-                    <div class="ogt-roll-math">${esc(r.line)}</div>
+                    <div class="ogt-roll-math">${esc(r.line)}${esc(reTxt)}</div>
                 </div>
-                <div class="ogt-roll-out">${esc(r.label)}</div>
+                <div class="ogt-roll-out">${esc(r.label)}</div>${actions}
             </div>`;
         }
         const sign = (n) => (n >= 0 ? `+ ${n}` : `− ${Math.abs(n)}`);
@@ -833,10 +851,18 @@ ${SOCIAL_RULES}`;
             <div class="ogt-die">${r.nat}</div>
             <div class="ogt-roll-main">
                 <div class="ogt-roll-title">${esc(r.skill)} check${r.why ? `<span> · ${esc(r.why)}</span>` : ''}</div>
-                <div class="ogt-roll-math">${parts.join(' ')} = <b>${r.total}</b> vs DC ${r.dc}</div>
+                <div class="ogt-roll-math">${parts.join(' ')} = <b>${r.total}</b> vs DC ${r.dc}${esc(reTxt)}</div>
             </div>
-            <div class="ogt-roll-out">${OUTCOMES[r.outcome]}</div>
+            <div class="ogt-roll-out">${OUTCOMES[r.outcome]}</div>${actions}
         </div>`;
+    }
+
+    /** Buttons shown on a failed roll while the narrator is still waiting (accepted === false). */
+    function decisionHtml(chk, live) {
+        if (!live || chk.accepted !== false) return '';
+        const luck = getState().luck;
+        return `<div class="ogt-decide"><button class="ogt-reroll-btn" ${luck > 0 ? '' : 'disabled'} title="Spend 1 Luck and roll again — you must keep the new result">🍀 Reroll · ${luck}</button>
+            <button class="ogt-accept-btn">Accept</button></div>`;
     }
 
     /** Idempotently put a roll card above each message that has one (DOM only — never saved into the chat text). */
@@ -860,7 +886,7 @@ ${SOCIAL_RULES}`;
                 if (cur && cur.dataset.sig === sig) continue;
                 cur?.remove();
                 const html = kind === 'roll' ? rollHtml(w.data, 'roll', sig)
-                    : w.data.result ? rollHtml(w.data.result, 'check', sig) : checkHtml(w.data, live, sig);
+                    : w.data.result ? rollHtml(w.data.result, 'check', sig, decisionHtml(w.data, live)) : checkHtml(w.data, live, sig);
                 el.querySelector('.mes_text')?.insertAdjacentHTML(w.place, html);
             }
         });
@@ -922,7 +948,7 @@ ${SOCIAL_RULES}`;
             const x = chat[i].extra;
             if (x?.ogt_quick) return x.ogt_quick;
             const r = x?.ogt_check?.result;
-            if (r) return rollMessage(r, `${r.skill} check${x.ogt_check.why ? ` (${x.ogt_check.why})` : ''}`);
+            if (r && x.ogt_check.accepted !== false) return rollMessage(r, `${r.skill} check${x.ogt_check.why ? ` (${x.ogt_check.why})` : ''}`);
             if (chat[i].is_user) return '';
         }
         return '';
@@ -940,42 +966,94 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
 
     const OUTCOME_TXT = { ...OUTCOMES };
     function rollMessage(res, label) {
-        if (res.text) return `[ROLL] ${res.text}`;
+        const rr = res.rerolled != null ? ` (the player spent Luck to reroll; the earlier d20 was ${res.rerolled} — this is the final result)` : '';
+        if (res.text) return `[ROLL] ${res.text}${rr}`;
         const bonus = res.bonus ? ` ${res.bonus >= 0 ? '+' : '−'} ${Math.abs(res.bonus)} ${res.trained ? 'skill' : res.ability ? AB_NAME[res.ability] : ''}`.trimEnd() : '';
         const mod = (res.rel ? ` ${res.rel >= 0 ? '+' : '−'} ${Math.abs(res.rel)} ${res.npc ? res.npc + "'s" : 'their'} attitude` : '')
             + (res.mod ? ` ${res.mod >= 0 ? '+' : '−'} ${Math.abs(res.mod)} situation` : '');
         const die = res.adv ? `d20 [${res.dice[0]}, ${res.dice[1]}] → ${res.nat} (${res.adv > 0 ? 'advantage' : 'disadvantage'})` : `d20 ${res.nat}`;
         const dc = res.dc == null ? '' : ` vs DC ${res.dc} — ${OUTCOME_TXT[res.outcome]}`;
-        return `[ROLL] ${label}: ${die}${bonus}${mod} = ${res.total}${dc}.`;
+        return `[ROLL] ${label}: ${die}${bonus}${mod} = ${res.total}${dc}.${rr}`;
     }
 
-    async function doCheckRoll(btn) {
-        if (rolling) return;
-        const el = btn.closest('.mes');
-        const id = +el?.getAttribute('mesid');
+    // ── luck & rerolls ──
+    // A failed roll can be rerolled by spending a Luck point BEFORE the narrator describes it (the new roll must be kept).
+    const BAD_OUTCOMES = ['fail', 'badfail', 'critfail'];
+    const luckOn = () => settings().luckRerolls;
+    const checkLabel = (res, chk) => `${res.skill} check${chk.why ? ` (${chk.why})` : ''}`;
+
+    function resolveCheck(chk, dice, state) {
+        return chk.kind === 'attack' ? resolveAttack(chk, dice, state)
+            : chk.kind === 'defend' ? resolveDefend(chk, dice, state)
+                : resolveRoll(chk, dice, state);
+    }
+    const isCombat = (chk) => chk.kind === 'attack' || chk.kind === 'defend';
+
+    /** Spin the die on a card, then resolve. Returns the live check or null if the click isn't valid. */
+    function locateCheck(btn, wantPending) {
+        const id = +btn.closest('.mes')?.getAttribute('mesid');
         const c = ctx();
         const chk = c.chat[id]?.extra?.ogt_check;
-        if (!chk || chk.result || id !== c.chat.length - 1) return;
-        if (isGenerating()) return window.toastr?.info('Wait for the reply to finish first.', "Old Greg's Tavern");
-
+        if (!chk || id !== c.chat.length - 1) return null;
+        if (wantPending ? chk.accepted !== false : !!chk.result) return null;
+        if (isGenerating()) { window.toastr?.info('Wait for the reply to finish first.', "Old Greg's Tavern"); return null; }
+        return chk;
+    }
+    async function spinDie(btn, label) {
         rolling = true;
-        btn.disabled = true; btn.textContent = 'Rolling…';
+        btn.disabled = true; btn.textContent = label;
         const die = btn.closest('.ogt-card')?.querySelector('.ogt-die');
         const spin = setInterval(() => { if (die) die.textContent = 1 + Math.floor(Math.random() * 20); }, 55);
         await new Promise((r) => setTimeout(r, 750));
         clearInterval(spin);
+    }
 
-        const state = getState();
-        const dice = { a: d20(), b: d20() };
-        const res = chk.kind === 'attack' ? resolveAttack(chk, dice, state)
-            : chk.kind === 'defend' ? resolveDefend(chk, dice, state)
-                : resolveRoll(chk, dice, state);
+    async function doCheckRoll(btn) {
+        if (rolling) return;
+        const chk = locateCheck(btn, false);
+        if (!chk) return;
+        await spinDie(btn, 'Rolling…');
+
+        const c = ctx(), state = getState();
+        chk.pre = { hp: state.hp, enemies: clone(state.enemies) }; // so a reroll can undo combat damage
+        const res = resolveCheck(chk, { a: d20(), b: d20() }, state);
         chk.result = res;
         rolling = false;
-        if (chk.kind === 'attack' || chk.kind === 'defend') persist({ manual: true }); // enemy / player HP changed
-        else c.saveChat?.();
+        // offer a Luck reroll on a bad outcome; otherwise the result goes straight to the narrator
+        const offer = luckOn() && state.luck > 0 && BAD_OUTCOMES.includes(res.outcome);
+        chk.accepted = !offer;
+        if (isCombat(chk)) persist({ manual: true }); else c.saveChat?.();
         decorateRolls();
-        deliverRoll(rollMessage(res, `${res.skill} check${chk.why ? ` (${chk.why})` : ''}`));
+        if (!offer) deliverRoll(rollMessage(res, checkLabel(res, chk)));
+    }
+
+    async function doReroll(btn) {
+        if (rolling) return;
+        const chk = locateCheck(btn, true);
+        const state = getState();
+        if (!chk || !(state.luck > 0)) return;
+        await spinDie(btn, 'Rerolling…');
+
+        const c = ctx(), prev = chk.result.nat;
+        state.luck -= 1;
+        if (chk.pre) { state.hp = chk.pre.hp; state.enemies = clone(chk.pre.enemies); } // undo the first roll's damage
+        const res = resolveCheck(chk, { a: d20(), b: d20() }, state);
+        res.rerolled = prev;
+        chk.result = res; chk.accepted = true;
+        rolling = false;
+        persist({ manual: true });
+        decorateRolls();
+        deliverRoll(rollMessage(res, checkLabel(res, chk)));
+    }
+
+    function doAccept(btn) {
+        if (rolling) return;
+        const chk = locateCheck(btn, true);
+        if (!chk) return;
+        chk.accepted = true;
+        ctx().saveChat?.();
+        decorateRolls();
+        deliverRoll(rollMessage(chk.result, checkLabel(chk.result, chk)));
     }
 
     /** Roll a skill on your own initiative (no DC — the narrator judges the total). */
@@ -1104,6 +1182,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
             level: 1, xp: 0, hp: cls.hp, hpMax: cls.hp, mana: cls.mana, manaMax: cls.mana,
             skills: [], skillPoints: 0, created: true,
             stats: { ...(CLASS_KIT[cls.id]?.stats || s.stats) }, statPoints: 0, inv: [], gold: CLASS_KIT[cls.id]?.gold ?? 0, enemies: [],
+            luck: 1, luckMax: 3,
         });
         for (const spec of CLASS_KIT[cls.id]?.gear || []) {
             const it = addItem(s, spec);
@@ -1239,6 +1318,7 @@ ${notes.map((t) => '- ' + t).join('\n')}` : '';
             ${meguminDetected() ? `<div class="ogt-empty">Megumin Suite detected. Let it handle prose, memory, NPC dossiers and images; this panel covers the RPG sheet, quests and relationship scores. If you'd rather use only Megumin's NPC tracking, untick "Track NPC relationship scores".</div>` : ''}
             ${chk('collapseMenu', 'Hide ST\'s top icon row behind a menu button')}
             ${chk('dice', 'Dice rolls: skill checks with roll cards')}
+            ${chk('luckRerolls', 'Luck: spend a point to reroll a failed check (click-to-roll mode)')}
             <label class="ogt-field">Roll mode<select data-ogt-setting="rollMode">
                 <option value="manual" ${s.rollMode === 'manual' ? 'selected' : ''}>Click to roll (you roll when asked)</option>
                 <option value="auto" ${s.rollMode === 'auto' ? 'selected' : ''}>Automatic (game rolls for you)</option></select></label>
@@ -1503,7 +1583,11 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
         panel.addEventListener('change', onChange);
         document.addEventListener('click', (e) => {
             const b = e.target.closest('.ogt-check-btn');
-            if (b) doCheckRoll(b);
+            if (b) return doCheckRoll(b);
+            const rr = e.target.closest('.ogt-reroll-btn');
+            if (rr) return doReroll(rr);
+            const ac = e.target.closest('.ogt-accept-btn');
+            if (ac) doAccept(ac);
         });
         // top icon row lives behind a button (CSS does the hiding; this just toggles the class)
         const drawerOpen = () => !!document.querySelector('#top-settings-holder .drawer-content.openDrawer');

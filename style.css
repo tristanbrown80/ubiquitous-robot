@@ -245,6 +245,14 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 .ogt-roll.out-fail { --c: #fb923c; } .ogt-roll.out-badfail { --c: #f87171; }
 .ogt-roll.out-critfail { --c: #ef4444; box-shadow: 0 0 18px rgba(239, 68, 68, .35); }
 .ogt-roll.ogt-check { --c: #e9b872; }
+.ogt-acrow .luck b { color: #86efac; }
+.ogt-decide { flex: 0 0 100%; display: flex; gap: 8px; justify-content: flex-end; margin-top: 2px; }
+.ogt-reroll-btn, .ogt-accept-btn { padding: 7px 14px; border-radius: 8px; cursor: pointer; font-weight: 700; font-size: 12px; letter-spacing: .04em; border: 1px solid; }
+.ogt-reroll-btn { color: #0b0b0d; background: #86efac; border-color: #86efac; box-shadow: 0 0 14px rgba(134, 239, 172, .3); }
+.ogt-reroll-btn:disabled { background: #1a2a20; color: #5b7a66; border-color: #26402f; box-shadow: none; cursor: not-allowed; }
+.ogt-accept-btn { color: #e8e6e1; background: #131316; border-color: #3a3a42; }
+.ogt-accept-btn:hover { border-color: #e9b872; }
+.ogt-roll:has(.ogt-decide) { flex-wrap: wrap; }
 .ogt-check-btn { flex: 0 0 auto; margin-left: 8px; padding: 9px 18px; border-radius: 8px; cursor: pointer; font-weight: 700; font-size: 13px; letter-spacing: .06em; text-transform: uppercase;
     color: #0b0b0d; background: #e9b872; border: 0; box-shadow: 0 0 14px rgba(233, 184, 114, .35); transition: transform .12s, box-shadow .12s; }
 .ogt-check-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 0 22px rgba(233, 184, 114, .6); }

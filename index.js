@@ -251,6 +251,33 @@
         return sk;
     }
 
+    // Saving rewrites the WHOLE chat file, so never do it more than once in a burst (replies, clicks and typing all land here).
+    let saveTimer = null;
+    function scheduleSave() {
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => {
+            const c = ctx();
+            try { (c.saveMetadata || c.saveChat)?.call(c); } catch (e) { console.warn(`[${MODULE}] save failed`, e); }
+        }, 800);
+    }
+
+    // Snapshots exist so swipes/deletes can roll the tracker back. Keep them for recent replies plus a sparse
+    // checkpoint trail instead of one per message — otherwise the chat file balloons on long chats.
+    const SNAP_KEEP_RECENT = 60, SNAP_CHECKPOINT_EVERY = 25;
+    function pruneSnapshots() {
+        const chat = ctx().chat || [];
+        const cutoff = chat.length - SNAP_KEEP_RECENT;
+        for (let i = 0; i < cutoff; i++) {
+            const x = chat[i].extra;
+            if (x?.ogt_snap && i % SNAP_CHECKPOINT_EVERY !== 0) delete x.ogt_snap;
+            if (x?.ogt_check?.pre) delete x.ogt_check.pre;
+        }
+    }
+    function lastSnapIndex(chat) {
+        for (let i = chat.length - 1; i >= 0; i--) if (chat[i].extra?.ogt_snap) return i;
+        return -1;
+    }
+
     function persist({ manual = false } = {}) {
         const c = ctx();
         const md = c.chatMetadata;
@@ -258,11 +285,10 @@
         if (manual) {
             // keep hand edits alive across swipe/delete resyncs
             md.ogt_base = clone(md.ogt);
-            const last = [...c.chat].reverse().find((m) => m.extra?.ogt_snap);
-            if (last) last.extra.ogt_snap = clone(md.ogt);
-            c.saveChat?.();
+            const i = lastSnapIndex(c.chat);
+            if (i >= 0) c.chat[i].extra.ogt_snap = clone(md.ogt);
         }
-        c.saveMetadata();
+        scheduleSave();
         refreshPrompt();
         render();
     }
@@ -272,9 +298,10 @@
         const c = ctx();
         const md = c.chatMetadata;
         if (!md) return;
-        const chat = excludeLast ? c.chat.slice(0, -1) : c.chat;
-        const snapMsg = [...chat].reverse().find((m) => m.extra?.ogt_snap);
-        md.ogt = snapMsg ? clone(snapMsg.extra.ogt_snap) : clone(md.ogt_base || defaultState());
+        const end = excludeLast ? c.chat.length - 1 : c.chat.length;
+        let at = -1;
+        for (let i = end - 1; i >= 0; i--) if (c.chat[i].extra?.ogt_snap) { at = i; break; }
+        md.ogt = at >= 0 ? clone(c.chat[at].extra.ogt_snap) : clone(md.ogt_base || defaultState());
         refreshPrompt();
         render();
     }
@@ -457,6 +484,7 @@
         return deltas;
     }
 
+    let lastScanAt = -99;
     function onMessageReceived(id) {
         const s = settings();
         if (!s.enabled) return;
@@ -467,7 +495,8 @@
         if (!hasTags(msg.mes)) {
             lastStatus = 'Last reply had NO tracker tag' + (s.autoScan ? ' — auto-scanning…' : '.');
             console.warn(`[${MODULE}] no OGT tag in reply`, msg.mes.slice(-200));
-            if (s.autoScan) setTimeout(() => scanStory({ silent: true }), 1500);
+            // the fallback scan is a second full-context API call, so rate-limit it (at most once per 6 messages)
+            if (s.autoScan && c.chat.length - lastScanAt >= 6) { lastScanAt = c.chat.length; setTimeout(() => scanStory({ silent: true }), 1500); }
             pendingRoll = null; refreshPrompt();
             return render();
         }
@@ -520,8 +549,10 @@
         scheduleDecorate();
 
         try { c.updateMessageBlock?.(id, msg); } catch (e) { /* message may not be rendered yet */ }
-        c.saveChat?.();
-        persist();
+        pruneSnapshots();
+        const done = state.quests.filter((q) => q.status !== 'active'); // don't let finished quests pile up forever
+        if (done.length > 30) state.quests = state.quests.filter((q) => q.status === 'active' || done.indexOf(q) >= done.length - 30);
+        persist(); // single debounced save (SillyTavern also saves the chat itself after each reply)
         if (s.toasts) notes.forEach(([type, text]) => window.toastr?.[type]?.(text, "Old Greg's Tavern"));
     }
 
@@ -533,9 +564,12 @@
             player: s.name, class: s.class, level: s.level, xp: `${s.xp}/${xpNeeded(s.level)}`,
             hp: `${s.hp}/${s.hpMax}`, mana: `${s.mana}/${s.manaMax}`,
             scene: s.scene,
-            relationships: !settings().trackRel ? undefined : Object.fromEntries(Object.entries(s.rel).map(([n, r]) => [n, `${r.value} (${tierOf(r.value)})${r.note ? ' - ' + r.note : ''}`])),
+            // keep the injected state bounded as a long game accumulates NPCs / notes (most significant relationships first)
+            relationships: !settings().trackRel ? undefined : Object.fromEntries(Object.entries(s.rel)
+                .sort((a, b) => Math.abs(b[1].value) - Math.abs(a[1].value)).slice(0, 12)
+                .map(([n, r]) => [n, `${r.value} (${tierOf(r.value)})${r.note ? ' - ' + String(r.note).slice(0, 70) : ''}`])),
             traits: s.traits || undefined,
-            backstory: s.backstory || undefined,
+            backstory: s.backstory ? String(s.backstory).slice(0, 500) : undefined,
             skills: Object.fromEntries((s.skills || []).map((k) => [k.name, `${fmtMod(skillBonus(s, k))} (rank ${k.rank}/${settings().skillMaxRank} ${RANK_NAMES[k.rank] || ''})`])),
             abilities: Object.fromEntries(ABILITIES.map((a) => [AB_NAME[a], `${s.stats[a]} (${fmtMod(amod(s.stats[a]))})`])),
             armor_class: computeAC(s),
@@ -543,10 +577,10 @@
             gear: {
                 weapon: (() => { const w = equippedOf(s, 'weapon'); return w ? `${w.name} (${w.dmg}${w.bonus ? ` +${w.bonus}` : ''}, ${AB_NAME[w.ability]})` : 'unarmed'; })(),
                 armor: equippedOf(s, 'armor')?.name || 'none', shield: equippedOf(s, 'shield')?.name || 'none',
-                pack: Object.fromEntries(s.inv.filter((i) => !i.equipped).map((i) => [i.name, i.qty])), gold: s.gold,
+                pack: Object.fromEntries(s.inv.filter((i) => !i.equipped).slice(0, 25).map((i) => [i.name, i.qty])), gold: s.gold,
             },
             enemies: s.enemies.filter((e) => !e.defeated).map((e) => ({ name: e.name, hp: `${e.hp}/${e.hpMax}`, ac: e.ac })),
-            quests: s.quests.filter((q) => q.status === 'active').map((q) => ({ id: q.id, title: q.title, desc: q.desc, progress: q.progress, difficulty: q.difficulty, reward: `${questReward(q)} XP` })),
+            quests: s.quests.filter((q) => q.status === 'active').slice(-8).map((q) => ({ id: q.id, title: q.title, desc: String(q.desc || '').slice(0, 100), progress: String(q.progress || '').slice(0, 100), difficulty: q.difficulty, reward: `${questReward(q)} XP` })),
         };
         const extra = settings().extraRules?.trim();
         return `[Game tracker — out-of-character system rules. Never mention or quote this block in the story.]
@@ -1022,7 +1056,8 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         // offer a Luck reroll on a bad outcome; otherwise the result goes straight to the narrator
         const offer = luckOn() && state.luck > 0 && BAD_OUTCOMES.includes(res.outcome);
         chk.accepted = !offer;
-        if (isCombat(chk)) persist({ manual: true }); else c.saveChat?.();
+        if (!offer) delete chk.pre;
+        if (isCombat(chk)) persist({ manual: true }); else scheduleSave();
         decorateRolls();
         if (!offer) deliverRoll(rollMessage(res, checkLabel(res, chk)));
     }
@@ -1039,7 +1074,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (chk.pre) { state.hp = chk.pre.hp; state.enemies = clone(chk.pre.enemies); } // undo the first roll's damage
         const res = resolveCheck(chk, { a: d20(), b: d20() }, state);
         res.rerolled = prev;
-        chk.result = res; chk.accepted = true;
+        chk.result = res; chk.accepted = true; delete chk.pre;
         rolling = false;
         persist({ manual: true });
         decorateRolls();
@@ -1050,8 +1085,8 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (rolling) return;
         const chk = locateCheck(btn, true);
         if (!chk) return;
-        chk.accepted = true;
-        ctx().saveChat?.();
+        chk.accepted = true; delete chk.pre;
+        scheduleSave();
         decorateRolls();
         deliverRoll(rollMessage(chk.result, checkLabel(chk.result, chk)));
     }
@@ -1066,7 +1101,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         const text = rollMessage(res, `${skill.name} (rolled on my own initiative)`);
         const c = ctx();
         const last = c.chat[c.chat.length - 1];
-        if (last && !settings().showRollMsg) { last.extra = last.extra || {}; last.extra.ogt_quick = text; c.saveChat?.(); }
+        if (last && !settings().showRollMsg) { last.extra = last.extra || {}; last.extra.ogt_quick = text; scheduleSave(); }
         deliverRoll(text);
     }
     let decorateTimer = null;
@@ -1287,7 +1322,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (!last) return;
         last.extra = last.extra || {};
         last.extra.ogt_notes = [...(last.extra.ogt_notes || []), { t: text, done: false }];
-        c.saveChat?.();
+        scheduleSave();
     }
     function notesBlock() {
         const notes = (ctx().chat || []).flatMap((m) => (m.extra?.ogt_notes || []).filter((n) => !n.done).map((n) => n.t));
@@ -1510,7 +1545,6 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
                     const md = ctx().chatMetadata;
                     md.ogt = defaultState(); md.ogt_base = clone(md.ogt);
                     ctx().chat.forEach((m) => { if (m.extra) delete m.extra.ogt_snap; });
-                    ctx().saveChat?.();
                     persist();
                 }
                 return;
@@ -1527,11 +1561,11 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
                 state.hp = clamp(state.hp, 0, state.hpMax); state.mana = clamp(state.mana, 0, state.manaMax);
             }
             ctx().chatMetadata.ogt_base = clone(state);
-            ctx().saveMetadata(); refreshPrompt();
+            scheduleSave(); refreshPrompt();
         } else if (el.dataset.ogtStat) {
             state.stats[el.dataset.ogtStat] = clamp(Math.round(num(el.value, 10)), 1, 30);
             ctx().chatMetadata.ogt_base = clone(state);
-            ctx().saveMetadata(); refreshPrompt();
+            scheduleSave(); refreshPrompt();
         } else if (el.dataset.ogtRelRange) {
             state.rel[el.dataset.ogtRelRange].value = num(el.value);
             const foot = el.parentElement.querySelector('.ogt-rel-foot span'); if (foot) foot.textContent = el.value;

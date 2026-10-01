@@ -35,6 +35,8 @@
         skillMaxRank: 5,
         modelUnlockSkills: true,
         dice: true,
+        rollMode: 'manual', // manual = the model asks, you click to roll | auto = the game rolls for you before each reply
+        autoSendRoll: true,
         collapseMenu: true,
     };
 
@@ -302,9 +304,22 @@
         msg.extra = msg.extra || {};
         msg.extra.ogt_snap = clone(state);
 
-        const rollReq = deltas.find((d) => d?.roll)?.roll;
-        const roll = s.dice ? resolveRoll(rollReq, pendingRoll, state) : null;
-        if (roll) msg.extra.ogt_roll = roll; else delete msg.extra.ogt_roll;
+        delete msg.extra.ogt_roll; delete msg.extra.ogt_check;
+        if (s.dice && s.rollMode === 'manual') {
+            // the model asks for a check; the player rolls it by clicking the card
+            const req = deltas.find((d) => d?.check)?.check;
+            if (req && typeof req === 'object') {
+                const sk = findSkill(state, req.skill);
+                msg.extra.ogt_check = {
+                    skill: sk?.name || String(req.skill || 'Unskilled').slice(0, 30), trained: !!sk, bonus: sk ? sk.rank : 0,
+                    dc: clamp(Math.round(num(req.dc, 12)), 5, 30), mod: clamp(Math.round(num(req.mod, 0)), -5, 5),
+                    adv: Math.sign(num(req.adv, 0)), why: String(req.why || '').slice(0, 80),
+                };
+            }
+        } else if (s.dice) {
+            const roll = resolveRoll(deltas.find((d) => d?.roll)?.roll, pendingRoll, state);
+            if (roll) msg.extra.ogt_roll = roll;
+        }
         pendingRoll = null;
         scheduleDecorate();
 
@@ -493,8 +508,22 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
         };
     }
 
+    function checkBlock(s) {
+        const sheet = s.skills.length ? s.skills.map((k) => `${k.name} +${k.rank}`).join(', ') : 'none (all checks are +0)';
+        return `
+
+[Checks — the player rolls their own dice]
+When the player's action has real uncertainty AND a meaningful consequence for failing (an attack, sneaking past someone, persuading a resistant NPC, climbing, picking a lock, casting under pressure…), do NOT decide the outcome yourself. Narrate up to the moment of the attempt, STOP there, and request one check in the tag: "check":{"skill":"Stealth","dc":15,"mod":0,"adv":0,"why":"slip past the guards"}
+- Pick the best-fitting skill from the player's sheet (bonus = its rank; no fitting skill = +0). Player skills: ${sheet}.
+- DC: 8 easy, 12 routine, 15 moderate, 18 hard, 22 heroic. For strong situational factors add "mod" (-5..+5) and "adv":1 (advantage) / -1 (disadvantage).
+- The player then clicks to roll. Their next message begins with [ROLL] and states the total, the DC and the outcome (Critical Success, Strong Success, Success, Failure, Bad Failure or Critical Failure). Narrate EXACTLY that outcome honestly and let it matter; never ask for the same check again. If a [ROLL] message has no DC, judge the total against a fair DC for what they attempted.
+- Safe, trivial or purely conversational actions need no check — just narrate. At most one check per turn. Never state the dice numbers in your narration.`;
+    }
+
     function diceBlock(s) {
-        if (!settings().dice || !pendingRoll) return '';
+        if (!settings().dice) return '';
+        if (settings().rollMode === 'manual') return checkBlock(s);
+        if (!pendingRoll) return '';
         const sheet = s.skills.length ? s.skills.map((k) => `${k.name} +${k.rank}`).join(', ') : 'none (all checks are +0)';
         return `
 
@@ -508,12 +537,12 @@ When the player's action has real uncertainty AND a meaningful consequence for f
 5. Report it in the tag: "roll":{"skill":"Stealth","dc":15,"mod":0,"adv":0,"why":"slip past the guards"}. At most one roll per turn; omit "roll" if no check was warranted.`;
     }
 
-    function rollHtml(r) {
+    function rollHtml(r, kind = 'roll', sig = JSON.stringify(r)) {
         const sign = (n) => (n >= 0 ? `+ ${n}` : `− ${Math.abs(n)}`);
         const diceTxt = r.adv ? `d20 [${r.dice[0]}, ${r.dice[1]}] → ${r.nat} (${r.adv > 0 ? 'adv' : 'dis'})` : `d20 ${r.nat}`;
         const parts = [diceTxt, `${sign(r.bonus)} ${r.trained ? 'skill' : 'untrained'}`];
         if (r.mod) parts.push(`${sign(r.mod)} situation`);
-        return `<div class="ogt-roll out-${r.outcome}" data-sig="${esc(JSON.stringify(r))}">
+        return `<div class="ogt-roll ogt-card out-${r.outcome}" data-kind="${kind}" data-sig="${esc(sig)}">
             <div class="ogt-die">${r.nat}</div>
             <div class="ogt-roll-main">
                 <div class="ogt-roll-title">${esc(r.skill)} check${r.why ? `<span> · ${esc(r.why)}</span>` : ''}</div>
@@ -527,14 +556,96 @@ When the player's action has real uncertainty AND a meaningful consequence for f
     function decorateRolls() {
         const c = ctx();
         const on = settings().enabled && settings().dice;
+        const last = c.chat.length - 1;
         document.querySelectorAll('#chat .mes').forEach((el) => {
-            const roll = on ? c.chat[+el.getAttribute('mesid')]?.extra?.ogt_roll : null;
-            const cur = el.querySelector('.ogt-roll');
-            if (!roll) { cur?.remove(); return; }
-            if (cur && cur.dataset.sig === JSON.stringify(roll)) return;
-            cur?.remove();
-            el.querySelector('.mes_text')?.insertAdjacentHTML('beforebegin', rollHtml(roll));
+            const id = +el.getAttribute('mesid');
+            const ex = on ? c.chat[id]?.extra : null;
+            const want = {
+                roll: ex?.ogt_roll ? { data: ex.ogt_roll, place: 'beforebegin' } : null,   // auto-mode result: above the reply
+                check: ex?.ogt_check ? { data: ex.ogt_check, place: 'afterend' } : null,    // click-to-roll: below the reply
+            };
+            for (const kind of ['roll', 'check']) {
+                const cur = el.querySelector(`.ogt-card[data-kind="${kind}"]`);
+                const w = want[kind];
+                if (!w) { cur?.remove(); continue; }
+                const live = kind === 'check' && id === last && !rolling;
+                const sig = JSON.stringify(w.data) + (kind === 'check' ? `|${live}` : '');
+                if (cur && cur.dataset.sig === sig) continue;
+                cur?.remove();
+                const html = kind === 'roll' ? rollHtml(w.data, 'roll', sig)
+                    : w.data.result ? rollHtml(w.data.result, 'check', sig) : checkHtml(w.data, live, sig);
+                el.querySelector('.mes_text')?.insertAdjacentHTML(w.place, html);
+            }
         });
+    }
+
+    // ── click-to-roll ──
+    let rolling = false;
+
+    function checkHtml(k, live, sig) {
+        const sign = (n) => (n >= 0 ? `+${n}` : `−${Math.abs(n)}`);
+        const extra = [k.mod ? `${sign(k.mod)} situation` : '', k.adv ? (k.adv > 0 ? 'advantage' : 'disadvantage') : ''].filter(Boolean).join(' · ');
+        return `<div class="ogt-roll ogt-card ogt-check" data-kind="check" data-sig="${esc(sig)}">
+            <div class="ogt-die">d20</div>
+            <div class="ogt-roll-main">
+                <div class="ogt-roll-title">${esc(k.skill)} check${k.why ? `<span> · ${esc(k.why)}</span>` : ''}</div>
+                <div class="ogt-roll-math">${sign(k.bonus)} ${k.trained ? 'skill' : 'untrained'}${extra ? ' · ' + extra : ''} · DC ${k.dc}</div>
+            </div>
+            <button class="ogt-check-btn" ${live ? '' : 'disabled'}>${live ? 'Roll d20' : 'Expired'}</button>
+        </div>`;
+    }
+
+    const isGenerating = () => { const st = document.getElementById('mes_stop'); return !!st && getComputedStyle(st).display !== 'none'; };
+
+    /** Put a message in the chat as the player and send it (or just fill the box, per setting). */
+    function sendAsPlayer(text) {
+        const ta = document.getElementById('send_textarea');
+        if (!ta) return;
+        ta.value = text;
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        if (settings().autoSendRoll) document.getElementById('send_but')?.click();
+    }
+
+    const OUTCOME_TXT = { ...OUTCOMES };
+    function rollMessage(res, label) {
+        const bonus = res.bonus ? ` ${res.bonus >= 0 ? '+' : '−'} ${Math.abs(res.bonus)} ${res.trained ? 'skill' : ''}`.trimEnd() : '';
+        const mod = res.mod ? ` ${res.mod >= 0 ? '+' : '−'} ${Math.abs(res.mod)} situation` : '';
+        const die = res.adv ? `d20 [${res.dice[0]}, ${res.dice[1]}] → ${res.nat} (${res.adv > 0 ? 'advantage' : 'disadvantage'})` : `d20 ${res.nat}`;
+        const dc = res.dc == null ? '' : ` vs DC ${res.dc} — ${OUTCOME_TXT[res.outcome]}`;
+        return `[ROLL] ${label}: ${die}${bonus}${mod} = ${res.total}${dc}.`;
+    }
+
+    async function doCheckRoll(btn) {
+        if (rolling) return;
+        const el = btn.closest('.mes');
+        const id = +el?.getAttribute('mesid');
+        const c = ctx();
+        const chk = c.chat[id]?.extra?.ogt_check;
+        if (!chk || chk.result || id !== c.chat.length - 1) return;
+        if (isGenerating()) return window.toastr?.info('Wait for the reply to finish first.', "Old Greg's Tavern");
+
+        rolling = true;
+        btn.disabled = true; btn.textContent = 'Rolling…';
+        const die = btn.closest('.ogt-card')?.querySelector('.ogt-die');
+        const spin = setInterval(() => { if (die) die.textContent = 1 + Math.floor(Math.random() * 20); }, 55);
+        await new Promise((r) => setTimeout(r, 750));
+        clearInterval(spin);
+
+        const res = resolveRoll(chk, { a: d20(), b: d20() }, getState());
+        chk.result = res;
+        rolling = false;
+        c.saveChat?.();
+        decorateRolls();
+        sendAsPlayer(rollMessage(res, `${res.skill} check${chk.why ? ` (${chk.why})` : ''}`));
+    }
+
+    /** Roll a skill on your own initiative (no DC — the narrator judges the total). */
+    function quickRoll(skill) {
+        if (isGenerating()) return window.toastr?.info('Wait for the reply to finish first.', "Old Greg's Tavern");
+        const nat = d20();
+        const res = { skill: skill.name, trained: true, bonus: skill.rank, mod: 0, adv: 0, dice: [nat, nat], nat, total: nat + skill.rank, dc: null, outcome: null };
+        window.toastr?.info(`${skill.name}: d20 ${nat} + ${skill.rank} = ${res.total}`, '🎲 Roll');
+        sendAsPlayer(rollMessage(res, `${skill.name} (rolled on my own initiative)`));
     }
     let decorateTimer = null;
     const scheduleDecorate = () => { clearTimeout(decorateTimer); decorateTimer = setTimeout(decorateRolls, 80); };
@@ -649,7 +760,7 @@ When the player's action has real uncertainty AND a meaningful consequence for f
         const canUp = k.rank < max && pts >= cost;
         return `<div class="ogt-skill" data-sid="${esc(k.id)}">
             <div class="ogt-skill-head"><span class="ogt-skill-name">${esc(k.name)}</span>
-                <span class="ogt-quest-btns"><button class="ogt-btn small" data-ogt-act="skill-up" ${canUp ? '' : 'disabled'} title="Costs ${cost} point${cost > 1 ? 's' : ''}">${k.rank >= max ? 'MAX' : `+ ${cost}`}</button>
+                <span class="ogt-quest-btns"><button class="ogt-btn small" data-ogt-act="skill-roll" title="Roll ${esc(k.name)} (d20 + ${k.rank})">🎲</button><button class="ogt-btn small" data-ogt-act="skill-up" ${canUp ? '' : 'disabled'} title="Costs ${cost} point${cost > 1 ? 's' : ''}">${k.rank >= max ? 'MAX' : `+ ${cost}`}</button>
                 <button class="ogt-btn small" data-ogt-act="skill-del" title="Forget (refunds points)">✕</button></span></div>
             <div class="ogt-pips">${pips}<span class="ogt-xpchip">${esc(RANK_NAMES[k.rank] || '')}</span></div>
             ${k.desc ? `<div class="ogt-quest-desc">${esc(k.desc)}</div>` : ''}
@@ -695,6 +806,10 @@ When the player's action has real uncertainty AND a meaningful consequence for f
             ${meguminDetected() ? `<div class="ogt-empty">Megumin Suite detected. Let it handle prose, memory, NPC dossiers and images; this panel covers the RPG sheet, quests and relationship scores. If you'd rather use only Megumin's NPC tracking, untick "Track NPC relationship scores".</div>` : ''}
             ${chk('collapseMenu', 'Hide ST\'s top icon row behind a menu button')}
             ${chk('dice', 'Dice rolls: skill checks with roll cards')}
+            <label class="ogt-field">Roll mode<select data-ogt-setting="rollMode">
+                <option value="manual" ${s.rollMode === 'manual' ? 'selected' : ''}>Click to roll (you roll when asked)</option>
+                <option value="auto" ${s.rollMode === 'auto' ? 'selected' : ''}>Automatic (game rolls for you)</option></select></label>
+            ${chk('autoSendRoll', 'Send roll results to the chat automatically')}
             ${chk('autoScan', 'Auto-scan story when a reply has no tracker tag (extra API call)')}
             <div class="ogt-empty">${esc(lastStatus)}</div>
             <label class="ogt-field">Injection depth<input type="number" min="0" max="20" data-ogt-setting="depth" value="${s.depth}"></label>
@@ -804,6 +919,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             case 'q-del': state.quests = state.quests.filter((x) => x !== q); return persist({ manual: true });
             case 'open-creator': return openCreator();
             case 'goto-skills': activeTab = 'skills'; return render();
+            case 'skill-roll': if (skill) quickRoll(skill); return;
             case 'skill-up': {
                 if (!skill || skill.rank >= maxRank) return;
                 const cost = rankUpCost(skill.rank);
@@ -905,6 +1021,10 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
         panel.addEventListener('click', onClick);
         panel.addEventListener('input', onInput);
         panel.addEventListener('change', onChange);
+        document.addEventListener('click', (e) => {
+            const b = e.target.closest('.ogt-check-btn');
+            if (b) doCheckRoll(b);
+        });
         // top icon row lives behind a button (CSS does the hiding; this just toggles the class)
         const drawerOpen = () => !!document.querySelector('#top-settings-holder .drawer-content.openDrawer');
         document.getElementById('ogt-menu-btn').addEventListener('click', () => document.body.classList.toggle('ogt-menu-open'));
@@ -932,7 +1052,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             if (dry) return;
             if (type === 'swipe' || type === 'regenerate') syncFromChat(true);
             // fresh dice for every real reply (not for quiet scans, impersonation or continues)
-            if (settings().dice && [undefined, '', 'normal', 'regenerate', 'swipe'].includes(type)) {
+            if (settings().dice && settings().rollMode === 'auto' && [undefined, '', 'normal', 'regenerate', 'swipe'].includes(type)) {
                 pendingRoll = { a: d20(), b: d20() };
             }
             refreshPrompt();

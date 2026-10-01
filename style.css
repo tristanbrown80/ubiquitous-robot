@@ -217,6 +217,11 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 .ogt-roll.out-strong, .ogt-roll.out-success { --c: #4ade80; }
 .ogt-roll.out-fail { --c: #fb923c; } .ogt-roll.out-badfail { --c: #f87171; }
 .ogt-roll.out-critfail { --c: #ef4444; box-shadow: 0 0 18px rgba(239, 68, 68, .35); }
+.ogt-roll.ogt-check { --c: #e9b872; }
+.ogt-check-btn { flex: 0 0 auto; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-weight: 700; font-size: 12px; letter-spacing: .06em; text-transform: uppercase;
+    color: #0b0b0d; background: #e9b872; border: 0; box-shadow: 0 0 14px rgba(233, 184, 114, .35); transition: transform .12s, box-shadow .12s; }
+.ogt-check-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 0 22px rgba(233, 184, 114, .6); }
+.ogt-check-btn:disabled { background: #2a2418; color: #8d8678; box-shadow: none; cursor: default; }
 @keyframes ogt-pop { from { opacity: 0; transform: translateY(-6px) scale(.97); } to { opacity: 1; transform: none; } }
 .ogt-roll:hover .ogt-die, .ogt-roll .ogt-die { animation: ogt-spin .6s ease-out; }
 @keyframes ogt-spin { from { transform: rotate(-180deg) scale(.6); } to { transform: none; } }

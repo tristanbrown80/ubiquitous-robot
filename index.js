@@ -36,7 +36,7 @@
         modelUnlockSkills: true,
         dice: true,
         rollMode: 'manual', // manual = the model asks, you click to roll | auto = the game rolls for you before each reply
-        autoSendRoll: true,
+        showRollMsg: false, // false = the result is passed to the narrator silently; true = posted as a visible [ROLL] message
         collapseMenu: true,
     };
 
@@ -374,7 +374,7 @@ ${settings().trackRel ? ' "rel":{"Vex Nightshade":{"delta":5,"note":"short reaso
            "complete":["short_id"],"fail":["short_id"]}}
 Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS (hp negative for damage, positive for healing). ${settings().xpMode === 'quests'
     ? 'Do NOT award xp yourself — the game pays XP automatically when a quest is completed. When a quest begins, pick its "difficulty" honestly relative to the player\'s level (trivial: errand; easy: minor risk; medium: real danger or effort; hard: serious threat; deadly: likely lethal). Add "milestone":true to a quest update only when a major objective step is genuinely finished (max 3 per quest). Put a quest id in "complete" only when its goal is fully achieved.'
-    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes. Valid JSON only, on a single line.${extra ? '\n' + extra : ''}${diceBlock(s)}`;
+    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes. Valid JSON only, on a single line.${extra ? '\n' + extra : ''}${diceBlock(s)}${resultBlock()}`;
     }
 
     function refreshPrompt() {
@@ -532,7 +532,7 @@ When the player's action has real uncertainty AND a meaningful consequence for f
 The check must live ONLY inside that hidden <!--OGT:…--> comment. Never write it (or any JSON, "check:" or "dc") as visible text in the story.
 - Pick the best-fitting skill from the player's sheet (bonus = its rank; no fitting skill = +0). Player skills: ${sheet}.
 - DC: 8 easy, 12 routine, 15 moderate, 18 hard, 22 heroic. For strong situational factors add "mod" (-5..+5) and "adv":1 (advantage) / -1 (disadvantage).
-- The player then clicks to roll. Their next message begins with [ROLL] and states the total, the DC and the outcome (Critical Success, Strong Success, Success, Failure, Bad Failure or Critical Failure). Narrate EXACTLY that outcome honestly and let it matter; never ask for the same check again. If a [ROLL] message has no DC, judge the total against a fair DC for what they attempted.
+- The player then clicks to roll. You will receive the result — either as a [ROLL RESULT] block or a player message beginning with [ROLL] — giving the total, the DC and the outcome (Critical Success, Strong Success, Success, Failure, Bad Failure or Critical Failure). Narrate EXACTLY that outcome honestly and let it matter; never ask for the same check again. If a result has no DC, judge the total against a fair DC for what they attempted.
 - Safe, trivial or purely conversational actions need no check — just narrate. At most one check per turn. Never state the dice numbers in your narration.`;
     }
 
@@ -619,7 +619,42 @@ When the player's action has real uncertainty AND a meaningful consequence for f
         if (!ta) return;
         ta.value = text;
         ta.dispatchEvent(new Event('input', { bubbles: true }));
-        if (settings().autoSendRoll) document.getElementById('send_but')?.click();
+        document.getElementById('send_but')?.click();
+    }
+
+    /** Hand a finished roll to the narrator. Hidden by default: the result rides along in the prompt and we just trigger a reply. */
+    async function deliverRoll(text) {
+        if (!settings().showRollMsg) {
+            const run = ctx().executeSlashCommandsWithOptions;
+            if (run) {
+                refreshPrompt(); // makes the pending result part of the next prompt
+                try { await run('/trigger'); return; } catch (e) { console.warn(`[${MODULE}] /trigger failed, falling back to a visible message`, e); }
+            }
+        }
+        sendAsPlayer(text); // visible fallback (or user preference)
+    }
+
+    /** The most recent roll result the narrator hasn't answered yet (derived from the chat, so swipes/regens keep it). */
+    function pendingResultText() {
+        const chat = ctx().chat || [];
+        for (let i = chat.length - 1; i >= 0; i--) {
+            const x = chat[i].extra;
+            if (x?.ogt_quick) return x.ogt_quick;
+            const r = x?.ogt_check?.result;
+            if (r) return rollMessage(r, `${r.skill} check${x.ogt_check.why ? ` (${x.ogt_check.why})` : ''}`);
+            if (chat[i].is_user) return '';
+        }
+        return '';
+    }
+
+    function resultBlock() {
+        if (!settings().dice || settings().showRollMsg) return '';
+        const t = pendingResultText();
+        return t ? `
+
+[ROLL RESULT — the player just rolled; this resolves your requested check]
+${t.replace(/^\[ROLL\]\s*/, '')}
+Narrate exactly this outcome now, honestly, and let it matter. Do not request the same check again and do not state the numbers in the story.` : '';
     }
 
     const OUTCOME_TXT = { ...OUTCOMES };
@@ -652,7 +687,7 @@ When the player's action has real uncertainty AND a meaningful consequence for f
         rolling = false;
         c.saveChat?.();
         decorateRolls();
-        sendAsPlayer(rollMessage(res, `${res.skill} check${chk.why ? ` (${chk.why})` : ''}`));
+        deliverRoll(rollMessage(res, `${res.skill} check${chk.why ? ` (${chk.why})` : ''}`));
     }
 
     /** Roll a skill on your own initiative (no DC — the narrator judges the total). */
@@ -661,7 +696,11 @@ When the player's action has real uncertainty AND a meaningful consequence for f
         const nat = d20();
         const res = { skill: skill.name, trained: true, bonus: skill.rank, mod: 0, adv: 0, dice: [nat, nat], nat, total: nat + skill.rank, dc: null, outcome: null };
         window.toastr?.info(`${skill.name}: d20 ${nat} + ${skill.rank} = ${res.total}`, '🎲 Roll');
-        sendAsPlayer(rollMessage(res, `${skill.name} (rolled on my own initiative)`));
+        const text = rollMessage(res, `${skill.name} (rolled on my own initiative)`);
+        const c = ctx();
+        const last = c.chat[c.chat.length - 1];
+        if (last && !settings().showRollMsg) { last.extra = last.extra || {}; last.extra.ogt_quick = text; c.saveChat?.(); }
+        deliverRoll(text);
     }
     let decorateTimer = null;
     const scheduleDecorate = () => { clearTimeout(decorateTimer); decorateTimer = setTimeout(decorateRolls, 80); };
@@ -825,7 +864,7 @@ When the player's action has real uncertainty AND a meaningful consequence for f
             <label class="ogt-field">Roll mode<select data-ogt-setting="rollMode">
                 <option value="manual" ${s.rollMode === 'manual' ? 'selected' : ''}>Click to roll (you roll when asked)</option>
                 <option value="auto" ${s.rollMode === 'auto' ? 'selected' : ''}>Automatic (game rolls for you)</option></select></label>
-            ${chk('autoSendRoll', 'Send roll results to the chat automatically')}
+            ${chk('showRollMsg', 'Show roll results as a chat message (otherwise hidden — the roll card is enough)')}
             ${chk('autoScan', 'Auto-scan story when a reply has no tracker tag (extra API call)')}
             <div class="ogt-empty">${esc(lastStatus)}</div>
             <label class="ogt-field">Injection depth<input type="number" min="0" max="20" data-ogt-setting="depth" value="${s.depth}"></label>

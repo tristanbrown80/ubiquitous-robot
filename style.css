@@ -61,10 +61,57 @@ body.ogt-theme #chat .mes .mes_img_container, body.ogt-theme #chat .mes .mes_img
 body.ogt-right #ogt-panel { left: auto; right: 0; border-right: 0; border-left: 1px solid #3a2a14; }
 body.ogt-right #ogt-toggle { left: auto; right: 8px; }
 
-/* thin modern scrollbars */
-body.ogt-theme ::-webkit-scrollbar { width: 8px; height: 8px; }
-body.ogt-theme ::-webkit-scrollbar-thumb { background: #2a2a30; border-radius: 8px; }
-body.ogt-theme ::-webkit-scrollbar-track { background: transparent; }
+/* thin modern scrollbars (scrollbar-color wins over ::-webkit in current Chromium, which fixes the white track) */
+body.ogt-theme, body.ogt-theme * { scrollbar-width: thin; scrollbar-color: #2e2e35 transparent; }
+
+/* ═════════ Modernise the rest of SillyTavern ═════════
+   ST styles almost everything through --SmartTheme* variables, so we retint those. */
+body.ogt-theme {
+    --SmartThemeBodyColor: #e8e6e1;
+    --SmartThemeEmColor: #c9c3b6;
+    --SmartThemeQuoteColor: #ffffff;
+    --SmartThemeBlurTintColor: rgba(12, 12, 14, .94);
+    --SmartThemeChatTintColor: transparent;
+    --SmartThemeUserMesBlurTintColor: transparent;
+    --SmartThemeBotMesBlurTintColor: transparent;
+    --SmartThemeBorderColor: #26262b;
+    --SmartThemeShadowColor: rgba(0, 0, 0, .55);
+    --SmartThemeInputColor: #101012;
+}
+body.ogt-theme #sheld, body.ogt-theme #chat { background: transparent !important; border: 0 !important; box-shadow: none !important; backdrop-filter: none !important; }
+
+/* panels / drawers / popups */
+body.ogt-theme .drawer-content, body.ogt-theme .popup, body.ogt-theme #left-nav-panel, body.ogt-theme #right-nav-panel {
+    background: rgba(12, 12, 14, .95) !important; backdrop-filter: blur(16px);
+    border: 1px solid #26262b !important; border-radius: 14px !important; box-shadow: 0 20px 60px rgba(0, 0, 0, .6) !important;
+}
+body.ogt-theme .inline-drawer-toggle, body.ogt-theme .inline-drawer-header { border-radius: 8px; }
+body.ogt-theme .menu_button, body.ogt-theme .menu_button_icon, body.ogt-theme .menu_button_icon { border-radius: 8px !important; border: 1px solid #26262b !important; background: #131316 !important; transition: border-color .15s, background .15s; }
+body.ogt-theme .menu_button:hover { border-color: #e9b872 !important; background: #1a1710 !important; }
+body.ogt-theme .text_pole, body.ogt-theme textarea, body.ogt-theme select, body.ogt-theme input[type=text], body.ogt-theme input[type=number], body.ogt-theme input[type=search], body.ogt-theme input[type=password] {
+    background: #101012 !important; border: 1px solid #26262b !important; border-radius: 8px !important; color: #e8e6e1;
+}
+body.ogt-theme .text_pole:focus, body.ogt-theme textarea:focus, body.ogt-theme select:focus { border-color: #1f6b3d !important; outline: none; }
+body.ogt-theme hr { border-color: #1f1f23; }
+body.ogt-theme .character_select, body.ogt-theme .group_select { border-radius: 10px; }
+
+/* swipe arrows / counters stay subtle */
+body.ogt-theme .swipe_left, body.ogt-theme .swipe_right, body.ogt-theme .swipes-counter { opacity: .45; }
+body.ogt-theme .mes:hover .swipe_left, body.ogt-theme .mes:hover .swipe_right { opacity: .9; }
+
+/* ═════════ Top icon row behind a menu button ═════════ */
+#ogt-menu-btn { display: none; position: fixed; top: 6px; right: 14px; z-index: 3002; width: 36px; height: 36px; border-radius: 10px; cursor: pointer;
+    background: rgba(12, 12, 14, .85); color: #e8e6e1; border: 1px solid #26262b; backdrop-filter: blur(8px); transition: border-color .15s, color .15s; }
+#ogt-menu-btn:hover, body.ogt-menu-open #ogt-menu-btn { border-color: #e9b872; color: #e9b872; }
+body.ogt-collapse #ogt-menu-btn { display: block; }
+
+body.ogt-collapse #top-bar { background: transparent !important; border: 0 !important; backdrop-filter: none !important; box-shadow: none !important; }
+body.ogt-collapse #top-settings-holder {
+    background: rgba(12, 12, 14, .92) !important; border: 1px solid #26262b !important; border-top: 0 !important; border-radius: 0 0 16px 16px !important; backdrop-filter: blur(14px);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .5) !important; transition: opacity .18s ease;
+}
+/* hidden unless the menu is open or one of its panels is open */
+body.ogt-collapse:not(.ogt-menu-open) #top-settings-holder:not(:has(.drawer-content.openDrawer)) { opacity: 0; pointer-events: none; }
 
 /* panel gets the glass treatment too */
 body.ogt-theme #ogt-panel { background: rgba(8, 8, 10, .88); backdrop-filter: blur(14px); }

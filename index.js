@@ -35,6 +35,7 @@
         skillMaxRank: 5,
         modelUnlockSkills: true,
         dice: true,
+        collapseMenu: true,
     };
 
     // base XP by quest difficulty — the model only picks the difficulty, the extension pays out
@@ -692,6 +693,7 @@ When the player's action has real uncertainty AND a meaningful consequence for f
             ${chk('trackRel', 'Track NPC relationship scores')}
             <label class="ogt-field">Panel side<select data-ogt-setting="panelSide"><option value="left" ${s.panelSide === 'left' ? 'selected' : ''}>Left</option><option value="right" ${s.panelSide === 'right' ? 'selected' : ''}>Right</option></select></label>
             ${meguminDetected() ? `<div class="ogt-empty">Megumin Suite detected. Let it handle prose, memory, NPC dossiers and images; this panel covers the RPG sheet, quests and relationship scores. If you'd rather use only Megumin's NPC tracking, untick "Track NPC relationship scores".</div>` : ''}
+            ${chk('collapseMenu', 'Hide ST\'s top icon row behind a menu button')}
             ${chk('dice', 'Dice rolls: skill checks with roll cards')}
             ${chk('autoScan', 'Auto-scan story when a reply has no tracker tag (extra API call)')}
             <div class="ogt-empty">${esc(lastStatus)}</div>
@@ -869,6 +871,8 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
         const s = settings();
         document.body.classList.toggle('ogt-theme', !!(s.enabled && s.theme));
         document.body.classList.toggle('ogt-right', s.panelSide === 'right');
+        document.body.classList.toggle('ogt-collapse', !!(s.enabled && s.theme && s.collapseMenu));
+        if (!document.body.classList.contains('ogt-collapse')) document.body.classList.remove('ogt-menu-open');
         scheduleDecorate();
     }
 
@@ -884,6 +888,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
         if (document.getElementById('ogt-panel')) return;
         document.body.insertAdjacentHTML('beforeend', `
             <button id="ogt-toggle" title="Old Greg's Tavern"><i class="fa-solid fa-beer-mug-empty"></i></button>
+            <button id="ogt-menu-btn" title="Menu"><i class="fa-solid fa-bars"></i></button>
             <aside id="ogt-panel">
                 <div class="ogt-head">
                     <div class="ogt-tabs">
@@ -900,6 +905,15 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
         panel.addEventListener('click', onClick);
         panel.addEventListener('input', onInput);
         panel.addEventListener('change', onChange);
+        // top icon row lives behind a button (CSS does the hiding; this just toggles the class)
+        const drawerOpen = () => !!document.querySelector('#top-settings-holder .drawer-content.openDrawer');
+        document.getElementById('ogt-menu-btn').addEventListener('click', () => document.body.classList.toggle('ogt-menu-open'));
+        document.addEventListener('click', (e) => {
+            if (!document.body.classList.contains('ogt-menu-open')) return;
+            if (e.target.closest('#top-settings-holder, #ogt-menu-btn, .popup, #toast-container')) return;
+            if (!drawerOpen()) document.body.classList.remove('ogt-menu-open');
+        });
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !drawerOpen()) document.body.classList.remove('ogt-menu-open'); });
         document.getElementById('ogt-toggle').addEventListener('click', () => {
             settings().panelOpen = !settings().panelOpen; saveSettings(); render();
         });

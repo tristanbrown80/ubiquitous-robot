@@ -141,6 +141,22 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 .ogt-quest-title { font: 17px 'Pirata One', serif; color: var(--ogt-green); }
 .ogt-quest.done .ogt-quest-title { text-decoration: line-through; }
 .ogt-quest-btns { display: flex; gap: 4px; }
+.ogt-skill { margin-bottom: 8px; padding: 10px 12px; border: 1px solid var(--ogt-line); border-radius: 8px; background: linear-gradient(90deg, #1b1608, #100d06); }
+.ogt-skill-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.ogt-skill-name { font: 17px 'Pirata One', serif; color: var(--ogt-gold); }
+.ogt-pips { display: flex; align-items: center; gap: 4px; margin-top: 6px; }
+.ogt-pips i { width: 14px; height: 6px; border-radius: 2px; background: #2a2418; }
+.ogt-pips i.on { background: var(--ogt-gold); box-shadow: 0 0 6px rgba(233, 184, 114, .5); }
+.ogt-pips .ogt-xpchip { margin-left: 6px; }
+.ogt-points { display: flex; align-items: baseline; gap: 6px; padding: 10px 12px; border: 1px solid var(--ogt-line); border-radius: 8px; color: var(--ogt-dim); }
+.ogt-points span { font: 26px 'Pirata One', serif; color: var(--ogt-dim); }
+.ogt-points.has { border-color: #1f6b3d; background: #0d1f14; color: var(--ogt-text); }
+.ogt-points.has span { color: var(--ogt-green); }
+.ogt-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.ogt-chip { background: #111; color: var(--ogt-text); border: 1px solid #2c2c2c; border-radius: 99px; padding: 4px 10px; font-size: 11px; cursor: pointer; }
+.ogt-chip:hover:not(:disabled) { border-color: var(--ogt-gold); }
+.ogt-btn:disabled, .ogt-chip:disabled { opacity: .35; cursor: not-allowed; }
+.ogt-spend { border-color: #1f6b3d; color: var(--ogt-green); background: #0d1f14; }
 .ogt-quest-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .ogt-badge { font-size: 9px; letter-spacing: .1em; text-transform: uppercase; font-weight: 700; padding: 2px 7px; border-radius: 99px; border: 1px solid currentColor; }
 .ogt-badge.d-trivial { color: #9ca3af; } .ogt-badge.d-easy { color: #4ade80; } .ogt-badge.d-medium { color: #e9b872; }

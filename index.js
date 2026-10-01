@@ -31,6 +31,9 @@
         panelSide: 'left',
         xpMode: 'quests', // quests = only quest rewards give XP | mixed = quests + small ad-hoc XP | free = model decides
         xpMult: 1,
+        pointsPerLevel: 2,
+        skillMaxRank: 5,
+        modelUnlockSkills: true,
     };
 
     // base XP by quest difficulty — the model only picks the difficulty, the extension pays out
@@ -80,6 +83,7 @@
             scene: { region: '', location: '', time: '' },
             rel: {},
             quests: [],
+            skills: [], skillPoints: 0,
         };
     }
 
@@ -87,7 +91,33 @@
         const md = ctx().chatMetadata;
         if (!md) return defaultState();
         if (!md.ogt) md.ogt = defaultState();
+        // older saves / snapshots predate skills
+        if (!Array.isArray(md.ogt.skills)) md.ogt.skills = [];
+        if (!Number.isFinite(md.ogt.skillPoints)) md.ogt.skillPoints = 0;
         return md.ogt;
+    }
+
+    // ───────────────────────── skills ─────────────────────────
+    // A new skill costs 1 point (rank 1). Raising rank r → r+1 costs r+1 points. Total to master (5) = 15.
+    const rankUpCost = (rank) => rank + 1;
+    const spentOn = (sk) => (sk.rank * (sk.rank + 1)) / 2 - (sk.free ? 1 : 0);
+    const RANK_NAMES = ['Untrained', 'Novice', 'Apprentice', 'Skilled', 'Expert', 'Master'];
+    const slug = (n) => String(n).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+    const PRESET_SKILLS = [
+        ['Swordsmanship', 'Melee combat with blades.'], ['Archery', 'Bows, crossbows and thrown weapons.'],
+        ['Stealth', 'Moving unseen and unheard, picking pockets.'], ['Persuasion', 'Convincing, bargaining, charm.'],
+        ['Intimidation', 'Threats, presence, breaking morale.'], ['Lore', 'History, languages, arcane and religious knowledge.'],
+        ['Survival', 'Tracking, foraging, navigation, weather.'], ['Alchemy', 'Potions, poisons and reagents.'],
+        ['Magic', 'Channeling mana into spells.'], ['Smithing', 'Forging and repairing arms and armor.'],
+        ['Medicine', 'Treating wounds and illness.'], ['Lockpicking', 'Locks, traps and mechanisms.'],
+    ];
+
+    function addSkill(s, name, desc = '', { free = false } = {}) {
+        const id = slug(name);
+        if (!id || s.skills.some((k) => k.id === id)) return null;
+        const sk = { id, name: String(name).slice(0, 40), desc: String(desc || '').slice(0, 160), rank: 1, free };
+        s.skills.push(sk);
+        return sk;
     }
 
     function persist({ manual = false } = {}) {
@@ -131,7 +161,9 @@
             s.level += 1;
             s.hpMax += 5; s.manaMax += 2;
             s.hp = s.hpMax; s.mana = s.manaMax;
-            notes.push(['success', `Level up! ${s.name} is now level ${s.level}.`]);
+            const pts = Math.max(0, Math.round(num(settings().pointsPerLevel, 2)));
+            s.skillPoints = (s.skillPoints || 0) + pts;
+            notes.push(['success', `Level up! ${s.name} is now level ${s.level}.${pts ? ` +${pts} skill points.` : ''}`]);
         }
         return gained;
     }
@@ -163,6 +195,15 @@
             if (mode === 'free') gainXp(s, num(d.xp), notes);
             else if (mode === 'mixed') gainXp(s, clamp(num(d.xp), 0, MIXED_CAP), notes);
             // 'quests' mode: loose XP from the model is ignored
+        }
+
+        // the model may unlock a skill when the player genuinely learns one in the story (rank 1, free, max 1 per turn)
+        if (d.skills?.unlock && settings().modelUnlockSkills) {
+            const u = [].concat(d.skills.unlock)[0];
+            const name = typeof u === 'string' ? u : u?.name;
+            if (name && !(s.skills || (s.skills = [])).some((k) => k.id === slug(name))) {
+                if (addSkill(s, name, u?.desc, { free: true })) notes.push(['success', `New skill learned: ${name}`]);
+            }
         }
 
         if (d.scene && typeof d.scene === 'object') {
@@ -270,6 +311,7 @@
             hp: `${s.hp}/${s.hpMax}`, mana: `${s.mana}/${s.manaMax}`,
             scene: s.scene,
             relationships: !settings().trackRel ? undefined : Object.fromEntries(Object.entries(s.rel).map(([n, r]) => [n, `${r.value} (${tierOf(r.value)})${r.note ? ' - ' + r.note : ''}`])),
+            skills: Object.fromEntries((s.skills || []).map((k) => [k.name, `${k.rank}/${settings().skillMaxRank} ${RANK_NAMES[k.rank] || ''}`])),
             quests: s.quests.filter((q) => q.status === 'active').map((q) => ({ id: q.id, title: q.title, desc: q.desc, progress: q.progress, difficulty: q.difficulty, reward: `${questReward(q)} XP` })),
         };
         const extra = settings().extraRules?.trim();
@@ -277,19 +319,19 @@
 Current tracked state:
 ${JSON.stringify(compact)}
 
-Honour this state in the narrative (injured characters act injured, NPC attitudes match their relationship tier, active quests stay relevant).
+Honour this state in the narrative (injured characters act injured, NPC attitudes match their relationship tier, active quests stay relevant). Skills are the player's real competence: rank 1 = novice, 5 = master. Let outcomes reflect them — a rank-1 skill fumbles under pressure, a rank-5 skill is reliable — and never let the player perform feats far above their rank or level without consequence. Skill ranks are raised by the player with skill points, not by you.
 
 At the very END of EVERY reply, after all narrative, append exactly ONE hidden HTML comment with only the values that CHANGED this turn:
 <!--OGT:{...json...}-->
 Schema (omit anything unchanged; use {} content only if nothing changed — or omit the comment):
 {"hp":-3,"mana":-1,${settings().xpMode === 'quests' ? '' : '"xp":5,'}"class":"Death Knight",
  "scene":{"region":"King's Highway","location":"North of Crosshaven Gate","time":"Morning"},
-${settings().trackRel ? ' "rel":{"Vex Nightshade":{"delta":5,"note":"short reason / how they feel"}},\n' : ''} "quests":{"add":[{"id":"short_id","title":"Quest title","desc":"one line objective","difficulty":"trivial|easy|medium|hard|deadly"}],
+${settings().trackRel ? ' "rel":{"Vex Nightshade":{"delta":5,"note":"short reason / how they feel"}},\n' : ''}${settings().modelUnlockSkills ? ' "skills":{"unlock":[{"name":"Lockpicking","desc":"one line"}]},\n' : ''} "quests":{"add":[{"id":"short_id","title":"Quest title","desc":"one line objective","difficulty":"trivial|easy|medium|hard|deadly"}],
            "update":[{"id":"short_id","progress":"what's done / what's next","milestone":true}],
            "complete":["short_id"],"fail":["short_id"]}}
 Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS (hp negative for damage, positive for healing). ${settings().xpMode === 'quests'
     ? 'Do NOT award xp yourself — the game pays XP automatically when a quest is completed. When a quest begins, pick its "difficulty" honestly relative to the player\'s level (trivial: errand; easy: minor risk; medium: real danger or effort; hard: serious threat; deadly: likely lethal). Add "milestone":true to a quest update only when a major objective step is genuinely finished (max 3 per quest). Put a quest id in "complete" only when its goal is fully achieved.'
-    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''} Always keep "scene" current when location or time of day changes. Valid JSON only, on a single line.${extra ? '\n' + extra : ''}`;
+    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes. Valid JSON only, on a single line.${extra ? '\n' + extra : ''}`;
     }
 
     function refreshPrompt() {
@@ -330,6 +372,10 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
             ${bar('MANA', 'mana', s.mana, s.manaMax)}
             ${bar(`LVL ${s.level}`, 'xp', s.xp, xpNeeded(s.level))}
         </div>`;
+
+        if (s.skillPoints > 0) {
+            h += `<button class="ogt-btn ogt-wide ogt-spend" data-ogt-act="goto-skills">${s.skillPoints} skill point${s.skillPoints === 1 ? '' : 's'} to spend ›</button>`;
+        }
 
         if (s.scene.location || s.scene.region || s.scene.time) {
             h += `<div class="ogt-scene"><div class="ogt-scene-top">${esc([s.scene.region, s.scene.time].filter(Boolean).join(' · '))}</div>
@@ -394,6 +440,37 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
         return h;
     }
 
+    function skillHtml(k, pts, max) {
+        const pips = Array.from({ length: max }, (_, i) => `<i class="${i < k.rank ? 'on' : ''}"></i>`).join('');
+        const cost = rankUpCost(k.rank);
+        const canUp = k.rank < max && pts >= cost;
+        return `<div class="ogt-skill" data-sid="${esc(k.id)}">
+            <div class="ogt-skill-head"><span class="ogt-skill-name">${esc(k.name)}</span>
+                <span class="ogt-quest-btns"><button class="ogt-btn small" data-ogt-act="skill-up" ${canUp ? '' : 'disabled'} title="Costs ${cost} point${cost > 1 ? 's' : ''}">${k.rank >= max ? 'MAX' : `+ ${cost}`}</button>
+                <button class="ogt-btn small" data-ogt-act="skill-del" title="Forget (refunds points)">✕</button></span></div>
+            <div class="ogt-pips">${pips}<span class="ogt-xpchip">${esc(RANK_NAMES[k.rank] || '')}</span></div>
+            ${k.desc ? `<div class="ogt-quest-desc">${esc(k.desc)}</div>` : ''}
+        </div>`;
+    }
+
+    function renderSkills(s) {
+        const max = num(settings().skillMaxRank, 5);
+        const pts = s.skillPoints || 0;
+        let h = `<div class="ogt-points ${pts ? 'has' : ''}"><span>${pts}</span> skill point${pts === 1 ? '' : 's'} to spend</div>
+            <div class="ogt-empty">+${num(settings().pointsPerLevel, 2)} points each level. A new skill costs 1; raising rank r costs r+1.</div>
+            <div class="ogt-section">SKILLS</div>`;
+        h += s.skills.length ? s.skills.map((k) => skillHtml(k, pts, max)).join('') : `<div class="ogt-empty">No skills yet — learn one below, or let the story teach you.</div>`;
+        const have = new Set(s.skills.map((k) => k.id));
+        const left = PRESET_SKILLS.filter(([n]) => !have.has(slug(n)));
+        if (left.length) {
+            h += `<div class="ogt-section">LEARN A SKILL (1 POINT)</div><div class="ogt-chips">${left.map(([n, d]) => `<button class="ogt-chip" data-ogt-act="skill-preset" data-name="${esc(n)}" data-desc="${esc(d)}" ${pts < 1 ? 'disabled' : ''} title="${esc(d)}">${esc(n)}</button>`).join('')}</div>`;
+        }
+        h += `<div class="ogt-form"><input id="ogt-new-sk" placeholder="Custom skill name"><input id="ogt-new-skd" placeholder="What it covers (optional)">
+            <button class="ogt-btn ogt-wide" data-ogt-act="skill-add" ${pts < 1 ? 'disabled' : ''}>Learn custom skill</button>
+            ${s.skills.length ? `<button class="ogt-btn ogt-wide danger" data-ogt-act="skill-respec">Respec all skills</button>` : ''}</div>`;
+        return h;
+    }
+
     function renderGM() {
         const s = settings();
         const chk = (k, label) => `<label class="ogt-check"><input type="checkbox" data-ogt-setting="${k}" ${s[k] ? 'checked' : ''}> ${label}</label>`;
@@ -407,6 +484,9 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
                 <option value="mixed" ${s.xpMode === 'mixed' ? 'selected' : ''}>Quests + small bonus XP</option>
                 <option value="free" ${s.xpMode === 'free' ? 'selected' : ''}>Model decides (no limits)</option></select></label>
             <label class="ogt-field">XP multiplier<input type="number" step="0.25" min="0" max="10" data-ogt-setting="xpMult" value="${s.xpMult}"></label>
+            <label class="ogt-field">Skill points per level<input type="number" min="0" max="10" data-ogt-setting="pointsPerLevel" value="${s.pointsPerLevel}"></label>
+            <label class="ogt-field">Max skill rank<input type="number" min="1" max="10" data-ogt-setting="skillMaxRank" value="${s.skillMaxRank}"></label>
+            ${chk('modelUnlockSkills', 'Let the story unlock new skills (free, rank 1)')}
             ${chk('trackRel', 'Track NPC relationship scores')}
             <label class="ogt-field">Panel side<select data-ogt-setting="panelSide"><option value="left" ${s.panelSide === 'left' ? 'selected' : ''}>Left</option><option value="right" ${s.panelSide === 'right' ? 'selected' : ''}>Right</option></select></label>
             ${meguminDetected() ? `<div class="ogt-empty">Megumin Suite detected. Let it handle prose, memory, NPC dossiers and images; this panel covers the RPG sheet, quests and relationship scores. If you'd rather use only Megumin's NPC tracking, untick "Track NPC relationship scores".</div>` : ''}
@@ -435,7 +515,7 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
         if (active && panel.contains(active) && /INPUT|TEXTAREA/.test(active.tagName) && active.type !== 'range' && active.type !== 'checkbox') return; // don't clobber typing
         const body = panel.querySelector('.ogt-body');
         const scroll = body.scrollTop;
-        body.innerHTML = activeTab === 'character' ? renderCharacter(state) : activeTab === 'quests' ? renderQuests(state) : renderGM();
+        body.innerHTML = activeTab === 'character' ? renderCharacter(state) : activeTab === 'quests' ? renderQuests(state) : activeTab === 'skills' ? renderSkills(state) : renderGM();
         body.scrollTop = scroll;
     }
 
@@ -481,7 +561,9 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
 
         const state = getState();
         const act = target.dataset.ogtAct;
-        const root = target.closest('[data-rel],[data-qid]');
+        const root = target.closest('[data-rel],[data-qid],[data-sid]');
+        const skill = root?.dataset.sid ? state.skills.find((k) => k.id === root.dataset.sid) : null;
+        const maxRank = num(settings().skillMaxRank, 5);
         const relName = root?.dataset.rel;
         const q = root?.dataset.qid ? state.quests.find((x) => x.id === root.dataset.qid) : null;
 
@@ -515,6 +597,36 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             case 'q-fail': if (q) q.status = 'failed'; return persist({ manual: true });
             case 'q-reopen': if (q) q.status = 'active'; return persist({ manual: true });
             case 'q-del': state.quests = state.quests.filter((x) => x !== q); return persist({ manual: true });
+            case 'goto-skills': activeTab = 'skills'; return render();
+            case 'skill-up': {
+                if (!skill || skill.rank >= maxRank) return;
+                const cost = rankUpCost(skill.rank);
+                if (state.skillPoints < cost) return;
+                state.skillPoints -= cost; skill.rank += 1;
+                return persist({ manual: true });
+            }
+            case 'skill-del': {
+                if (!skill) return;
+                state.skillPoints += spentOn(skill);
+                state.skills = state.skills.filter((k) => k !== skill);
+                return persist({ manual: true });
+            }
+            case 'skill-preset':
+            case 'skill-add': {
+                if (state.skillPoints < 1) return;
+                const name = act === 'skill-preset' ? target.dataset.name : document.getElementById('ogt-new-sk').value.trim();
+                const desc = act === 'skill-preset' ? target.dataset.desc : document.getElementById('ogt-new-skd').value.trim();
+                if (!name || !addSkill(state, name, desc)) return;
+                state.skillPoints -= 1;
+                return persist({ manual: true });
+            }
+            case 'skill-respec':
+                if (confirm('Refund all spent skill points and forget every skill?')) {
+                    state.skills.forEach((k) => { state.skillPoints += spentOn(k); });
+                    state.skills = [];
+                    return persist({ manual: true });
+                }
+                return;
             case 'scan': return scanStory();
             case 'reset':
                 if (confirm('Reset all tracked stats, relationships and quests for this chat?')) {
@@ -572,7 +684,8 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
                     <div class="ogt-tabs">
                         <button class="ogt-tab" data-tab="character">Character</button>
                         <button class="ogt-tab" data-tab="quests">Quests</button>
-                        <button class="ogt-tab" data-tab="gm">Game Master</button>
+                        <button class="ogt-tab" data-tab="skills">Skills</button>
+                        <button class="ogt-tab" data-tab="gm">GM</button>
                     </div>
                     <button id="ogt-close" title="Hide">‹</button>
                 </div>

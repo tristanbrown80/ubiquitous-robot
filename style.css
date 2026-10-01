@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Pirata+One&display=swap');
+/* Fonts (Inter, Pirata One) are loaded non-blockingly from index.js; if they can't load, the fallbacks below apply. */
 
 /* ═════════ Modern chat theme (body.ogt-theme) ═════════ */
 body.ogt-theme {

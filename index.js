@@ -1637,8 +1637,20 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
         });
     }
 
+    /** Load web fonts without ever blocking page styling (a failed/slow request just leaves the system fallback). */
+    function loadFonts() {
+        if (document.getElementById('ogt-fonts')) return;
+        const l = document.createElement('link');
+        l.id = 'ogt-fonts'; l.rel = 'stylesheet'; l.media = 'print'; // media=print = loads without blocking render
+        l.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Pirata+One&display=swap';
+        l.onload = () => { l.media = 'all'; };
+        l.onerror = () => l.remove();
+        document.head.appendChild(l);
+    }
+
     function init() {
         settings();
+        loadFonts();
         buildUI();
         applyTheme();
         const { eventSource, eventTypes } = ctx();

@@ -269,6 +269,13 @@
         return notes;
     }
 
+    // Models sometimes write the payload as a visible line instead of inside the hidden comment, e.g.
+    //   OGT:{"hp":-2}      check:{"skill":"Magic","dc":15}      "roll":{...}
+    // Catch those too so nothing leaks into the story and the request still works.
+    const BARE_RE = /^[ \t>*_`-]*(?:OGT\s*:\s*(\{.*\})|"?(check|roll)"?\s*:\s*(\{.*\}))[ \t,`*_]*$/gim;
+    const hasTags = (text) => new RegExp(TAG_RE.source, 'i').test(text) || new RegExp(BARE_RE.source, 'im').test(text);
+    const stripTags = (text) => text.replace(TAG_RE, '').replace(BARE_RE, '').replace(/\n{3,}/g, '\n\n').trimEnd();
+
     function parseTags(text) {
         const deltas = [];
         let m;
@@ -276,6 +283,13 @@
         while ((m = TAG_RE.exec(text))) {
             const raw = (m[1] ?? m[2] ?? m[3] ?? '').trim().replace(/^```(?:json)?|```$/g, '').trim();
             try { deltas.push(JSON.parse(raw)); } catch (e) { console.warn(`[${MODULE}] bad OGT json`, raw); }
+        }
+        BARE_RE.lastIndex = 0;
+        while ((m = BARE_RE.exec(text))) {
+            try {
+                if (m[1]) deltas.push(JSON.parse(m[1]));
+                else deltas.push({ [m[2].toLowerCase()]: JSON.parse(m[3]) });
+            } catch (e) { console.warn(`[${MODULE}] bad bare OGT json`, m[0]); }
         }
         return deltas;
     }
@@ -286,7 +300,7 @@
         const c = ctx();
         const msg = c.chat[id];
         if (!msg || msg.is_user || msg.is_system || typeof msg.mes !== 'string') return;
-        if (!new RegExp(TAG_RE.source, 'i').test(msg.mes)) {
+        if (!hasTags(msg.mes)) {
             lastStatus = 'Last reply had NO tracker tag' + (s.autoScan ? ' — auto-scanning…' : '.');
             console.warn(`[${MODULE}] no OGT tag in reply`, msg.mes.slice(-200));
             if (s.autoScan) setTimeout(() => scanStory({ silent: true }), 1500);
@@ -300,7 +314,7 @@
         const deltas = parseTags(msg.mes);
         for (const d of deltas) notes.push(...applyDelta(state, d));
 
-        msg.mes = msg.mes.replace(TAG_RE, '').trimEnd();
+        msg.mes = stripTags(msg.mes);
         msg.extra = msg.extra || {};
         msg.extra.ogt_snap = clone(state);
 
@@ -513,7 +527,9 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
         return `
 
 [Checks — the player rolls their own dice]
-When the player's action has real uncertainty AND a meaningful consequence for failing (an attack, sneaking past someone, persuading a resistant NPC, climbing, picking a lock, casting under pressure…), do NOT decide the outcome yourself. Narrate up to the moment of the attempt, STOP there, and request one check in the tag: "check":{"skill":"Stealth","dc":15,"mod":0,"adv":0,"why":"slip past the guards"}
+When the player's action has real uncertainty AND a meaningful consequence for failing (an attack, sneaking past someone, persuading a resistant NPC, climbing, picking a lock, casting under pressure…), do NOT decide the outcome yourself. Narrate up to the moment of the attempt, STOP there, and request one check by putting it inside the SAME hidden tag you always append at the very end of the reply, e.g.
+<!--OGT:{"check":{"skill":"Stealth","dc":15,"mod":0,"adv":0,"why":"slip past the guards"}}-->
+The check must live ONLY inside that hidden <!--OGT:…--> comment. Never write it (or any JSON, "check:" or "dc") as visible text in the story.
 - Pick the best-fitting skill from the player's sheet (bonus = its rank; no fitting skill = +0). Player skills: ${sheet}.
 - DC: 8 easy, 12 routine, 15 moderate, 18 hard, 22 heroic. For strong situational factors add "mod" (-5..+5) and "adv":1 (advantage) / -1 (disadvantage).
 - The player then clicks to roll. Their next message begins with [ROLL] and states the total, the DC and the outcome (Critical Success, Strong Success, Success, Failure, Bad Failure or Critical Failure). Narrate EXACTLY that outcome honestly and let it matter; never ask for the same check again. If a [ROLL] message has no DC, judge the total against a fair DC for what they attempted.
@@ -534,7 +550,7 @@ When the player's action has real uncertainty AND a meaningful consequence for f
 2. Choose a DC: 8 easy, 12 routine, 15 moderate, 18 hard, 22 heroic. For strong situational factors add "mod" (-5..+5), and "adv":1 for advantage / -1 for disadvantage.
 3. nat = die #1 (advantage: the higher die; disadvantage: the lower). total = nat + skill bonus + mod. Natural 20 always succeeds, natural 1 always fails; otherwise total >= DC succeeds. Beating the DC by 5+ is a strong success; missing by 5+ is a bad failure.
 4. Narrate the outcome honestly and let it matter. Never fudge the result and never state the numbers in prose — the game shows the roll.
-5. Report it in the tag: "roll":{"skill":"Stealth","dc":15,"mod":0,"adv":0,"why":"slip past the guards"}. At most one roll per turn; omit "roll" if no check was warranted.`;
+5. Report it inside the hidden end-of-reply tag, e.g. <!--OGT:{"roll":{"skill":"Stealth","dc":15,"mod":0,"adv":0,"why":"slip past the guards"}}-->, never as visible text. At most one roll per turn; omit "roll" if no check was warranted.`;
     }
 
     function rollHtml(r, kind = 'roll', sig = JSON.stringify(r)) {

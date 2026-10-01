@@ -157,6 +157,38 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 .ogt-chip:hover:not(:disabled) { border-color: var(--ogt-gold); }
 .ogt-btn:disabled, .ogt-chip:disabled { opacity: .35; cursor: not-allowed; }
 .ogt-spend { border-color: #1f6b3d; color: var(--ogt-green); background: #0d1f14; }
+/* character creator modal */
+#ogt-cc { display: none; position: fixed; inset: 0; z-index: 4000; background: rgba(0, 0, 0, .7); backdrop-filter: blur(4px); align-items: center; justify-content: center; padding: 12px; box-sizing: border-box; }
+#ogt-cc.open { display: flex; }
+#ogt-cc { --ogt-line: #3a2a14; --ogt-gold: #e9b872; --ogt-green: #4ade80; --ogt-text: #e8e6e1; --ogt-dim: #8d8678; font-size: 13px; color: var(--ogt-text); }
+.cc-modal { width: min(760px, 100%); max-height: 100%; display: flex; flex-direction: column; background: #0b0b0d; border: 1px solid var(--ogt-line); border-radius: 12px; box-shadow: 0 20px 60px rgba(0, 0, 0, .7); }
+.cc-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px 6px; }
+.cc-title { font: 26px 'Pirata One', serif; }
+.cc-warn { margin: 0 16px; padding: 6px 10px; border-radius: 6px; background: #2a1810; color: #fca5a5; font-size: 12px; }
+.cc-steps { display: flex; gap: 14px; padding: 8px 16px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--ogt-dim); }
+.cc-steps .on { color: var(--ogt-green); }
+.cc-body { padding: 4px 16px 12px; overflow-y: auto; }
+.cc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
+.cc-class { padding: 12px; border: 1px solid var(--ogt-line); border-radius: 10px; cursor: pointer; background: linear-gradient(135deg, #1b1608, #0e0b06); transition: border-color .15s, transform .15s; }
+.cc-class:hover { border-color: var(--ogt-gold); transform: translateY(-1px); }
+.cc-class.sel { border-color: var(--ogt-green); background: linear-gradient(135deg, #12301d, #0a1a11); }
+.cc-cname { font: 21px 'Pirata One', serif; color: var(--ogt-gold); }
+.cc-class.sel .cc-cname { color: var(--ogt-green); }
+.cc-tag { color: #cfc7b8; font-size: 12px; margin: 2px 0 6px; }
+.cc-stats { font-size: 11px; color: var(--ogt-dim); } .cc-stats b { color: var(--ogt-text); }
+.cc-skills { margin-top: 4px; font-size: 11px; color: var(--ogt-dim); }
+.cc-traits { margin-top: 12px; padding: 10px 12px; border-left: 2px solid var(--ogt-gold); background: #14110c; border-radius: 0 6px 6px 0; color: #cfc7b8; }
+.cc-foot { display: flex; justify-content: space-between; padding: 12px 16px; border-top: 1px solid var(--ogt-line); }
+.ogt-chip.sel { border-color: var(--ogt-green); color: var(--ogt-green); background: #0d1f14; }
+#ogt-cc .ogt-btn { background: #111; color: var(--ogt-text); border: 1px solid #2c2c2c; border-radius: 6px; padding: 8px 14px; cursor: pointer; font-size: 12px; }
+#ogt-cc .ogt-btn.small { padding: 3px 8px; }
+#ogt-cc .ogt-spend { border-color: #1f6b3d; color: var(--ogt-green); background: #0d1f14; }
+#ogt-cc .ogt-form { display: flex; flex-direction: column; gap: 6px; }
+#ogt-cc .ogt-form label { display: flex; flex-direction: column; gap: 2px; font-size: 10px; color: var(--ogt-dim); text-transform: uppercase; letter-spacing: .06em; margin-top: 6px; }
+#ogt-cc input, #ogt-cc textarea { background: #0f0f0f; color: var(--ogt-text); border: 1px solid #2c2c2c; border-radius: 6px; padding: 8px; font-size: 13px; width: 100%; box-sizing: border-box; }
+#ogt-cc .ogt-section { margin: 14px 0 8px; font-size: 10px; letter-spacing: .16em; font-weight: 700; }
+#ogt-cc .ogt-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+#ogt-cc .ogt-chip { background: #111; color: var(--ogt-text); border: 1px solid #2c2c2c; border-radius: 99px; padding: 4px 10px; font-size: 11px; cursor: pointer; }
 .ogt-quest-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .ogt-badge { font-size: 9px; letter-spacing: .1em; text-transform: uppercase; font-weight: 700; padding: 2px 7px; border-radius: 99px; border: 1px solid currentColor; }
 .ogt-badge.d-trivial { color: #9ca3af; } .ogt-badge.d-easy { color: #4ade80; } .ogt-badge.d-medium { color: #e9b872; }

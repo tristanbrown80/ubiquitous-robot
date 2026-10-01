@@ -100,7 +100,9 @@
     // ───────────────────────── skills ─────────────────────────
     // A new skill costs 1 point (rank 1). Raising rank r → r+1 costs r+1 points. Total to master (5) = 15.
     const rankUpCost = (rank) => rank + 1;
-    const spentOn = (sk) => (sk.rank * (sk.rank + 1)) / 2 - (sk.free ? 1 : 0);
+    // `base` = ranks granted for free (class / story); only ranks above it were paid for with points
+    const tri = (n) => (n * (n + 1)) / 2;
+    const spentOn = (sk) => tri(sk.rank) - tri(sk.base || 0);
     const RANK_NAMES = ['Untrained', 'Novice', 'Apprentice', 'Skilled', 'Expert', 'Master'];
     const slug = (n) => String(n).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
     const PRESET_SKILLS = [
@@ -112,10 +114,10 @@
         ['Medicine', 'Treating wounds and illness.'], ['Lockpicking', 'Locks, traps and mechanisms.'],
     ];
 
-    function addSkill(s, name, desc = '', { free = false } = {}) {
+    function addSkill(s, name, desc = '', { base = 0 } = {}) {
         const id = slug(name);
         if (!id || s.skills.some((k) => k.id === id)) return null;
-        const sk = { id, name: String(name).slice(0, 40), desc: String(desc || '').slice(0, 160), rank: 1, free };
+        const sk = { id, name: String(name).slice(0, 40), desc: String(desc || '').slice(0, 160), rank: Math.max(1, base), base };
         s.skills.push(sk);
         return sk;
     }
@@ -159,7 +161,7 @@
         while (s.xp >= xpNeeded(s.level)) {
             s.xp -= xpNeeded(s.level);
             s.level += 1;
-            s.hpMax += 5; s.manaMax += 2;
+            s.hpMax += s.growth?.hp ?? 5; s.manaMax += s.growth?.mana ?? 2;
             s.hp = s.hpMax; s.mana = s.manaMax;
             const pts = Math.max(0, Math.round(num(settings().pointsPerLevel, 2)));
             s.skillPoints = (s.skillPoints || 0) + pts;
@@ -202,7 +204,7 @@
             const u = [].concat(d.skills.unlock)[0];
             const name = typeof u === 'string' ? u : u?.name;
             if (name && !(s.skills || (s.skills = [])).some((k) => k.id === slug(name))) {
-                if (addSkill(s, name, u?.desc, { free: true })) notes.push(['success', `New skill learned: ${name}`]);
+                if (addSkill(s, name, u?.desc, { base: 1 })) notes.push(['success', `New skill learned: ${name}`]);
             }
         }
 
@@ -311,6 +313,8 @@
             hp: `${s.hp}/${s.hpMax}`, mana: `${s.mana}/${s.manaMax}`,
             scene: s.scene,
             relationships: !settings().trackRel ? undefined : Object.fromEntries(Object.entries(s.rel).map(([n, r]) => [n, `${r.value} (${tierOf(r.value)})${r.note ? ' - ' + r.note : ''}`])),
+            traits: s.traits || undefined,
+            backstory: s.backstory || undefined,
             skills: Object.fromEntries((s.skills || []).map((k) => [k.name, `${k.rank}/${settings().skillMaxRank} ${RANK_NAMES[k.rank] || ''}`])),
             quests: s.quests.filter((q) => q.status === 'active').map((q) => ({ id: q.id, title: q.title, desc: q.desc, progress: q.progress, difficulty: q.difficulty, reward: `${questReward(q)} XP` })),
         };
@@ -382,7 +386,12 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
                 <div class="ogt-scene-loc">${esc(s.scene.location)}</div></div>`;
         }
 
+        const noPlay = !ctx().chat.some((m) => m.is_user);
+        if (!s.created && noPlay) {
+            h += `<button class="ogt-btn ogt-wide ogt-spend" data-ogt-act="open-creator">✦ Create your character</button>`;
+        }
         h += `<button class="ogt-btn ogt-wide" data-ogt-act="toggle-edit">${editingChar ? 'Done editing' : 'Edit character'}</button>`;
+        if (editingChar || s.created) h += `<button class="ogt-btn ogt-wide" data-ogt-act="open-creator">${s.created ? 'Re-open character creator' : 'Character creator'}</button>`;
         if (editingChar) {
             h += `<div class="ogt-form">
                 ${field('name', 'Name', 'text')}${field('class', 'Class', 'text')}${field('avatar', 'Portrait URL', 'text')}
@@ -438,6 +447,110 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
             <select id="ogt-new-qdiff">${Object.entries(DIFFICULTY).map(([k, v]) => `<option value="${k}" ${k === 'medium' ? 'selected' : ''}>${k} (${v} XP)</option>`).join('')}</select>
             <button class="ogt-btn ogt-wide" data-ogt-act="add-quest">Add quest</button></div>`;
         return h;
+    }
+
+    // ───────────────────────── character creator ─────────────────────────
+
+    const CLASSES = [
+        { id: 'warrior', name: 'Warrior', tag: 'Steel, grit and a shield wall.', hp: 34, mana: 2, grow: [7, 1], skills: [['Swordsmanship', 3], ['Intimidation', 1], ['Survival', 1]],
+            traits: 'Trained soldier. Wears heavy armor and wields shields and blades with ease, shrugs off blows, and is hard to rattle. Clumsy at subtlety; has no real magic.' },
+        { id: 'rogue', name: 'Rogue', tag: 'Shadows, locks and quick knives.', hp: 24, mana: 4, grow: [5, 2], skills: [['Stealth', 3], ['Lockpicking', 2], ['Persuasion', 1]],
+            traits: 'Light, fast and sneaky. Strikes from surprise for outsized damage, but is fragile in a straight fight and fights dirty.' },
+        { id: 'mage', name: 'Mage', tag: 'Raw mana and forbidden pages.', hp: 18, mana: 16, grow: [3, 5], skills: [['Magic', 3], ['Lore', 2], ['Alchemy', 1]],
+            traits: 'Scholar-caster. Spells and rituals cost mana (report as negative mana). Powerful at range and with knowledge, physically frail, exhausted when mana runs dry.' },
+        { id: 'cleric', name: 'Cleric', tag: 'Faith, mending and wards.', hp: 26, mana: 10, grow: [5, 4], skills: [['Medicine', 2], ['Lore', 1], ['Persuasion', 1], ['Magic', 1]],
+            traits: 'Devout healer. Divine prayers (heal, ward, smite the unholy) cost mana. Respected by the faithful, resented by cults and the undead.' },
+        { id: 'ranger', name: 'Ranger', tag: 'Bow, wilds and patience.', hp: 28, mana: 5, grow: [6, 2], skills: [['Archery', 3], ['Survival', 3], ['Stealth', 1]],
+            traits: 'Wilderness hunter and tracker. Deadly at range, at home outdoors, uncomfortable in cities and crowds.' },
+        { id: 'bard', name: 'Bard', tag: 'Silver tongue, sharp wit.', hp: 22, mana: 8, grow: [4, 3], skills: [['Persuasion', 3], ['Lore', 2], ['Stealth', 1]],
+            traits: 'Charming performer and gossip. Talks their way into and out of trouble, picks up rumors everywhere; weak in direct combat. Minor magic through song costs mana.' },
+        { id: 'deathknight', name: 'Death Knight', tag: 'Bound to a cold, dark power.', hp: 30, mana: 8, grow: [6, 3], skills: [['Swordsmanship', 2], ['Magic', 2], ['Intimidation', 2]],
+            traits: 'Armored and bound to necrotic power. Dark abilities (life-drain, fear aura, unholy strikes) cost mana. Unsettles animals and the living, shunned by the faithful, and is unusually hard to kill.' },
+    ];
+    const presetDesc = (n) => PRESET_SKILLS.find(([p]) => p === n)?.[1] || '';
+
+    let cc = null; // creator wizard state
+
+    function openCreator() {
+        const s = getState();
+        const cur = CLASSES.find((c) => c.name === s.class);
+        cc = { step: 1, classId: cur?.id || '', name: s.name, avatar: s.avatar || '', backstory: s.backstory || '', bonus: '' };
+        if (!document.getElementById('ogt-cc')) document.body.insertAdjacentHTML('beforeend', '<div id="ogt-cc"></div>');
+        const el = document.getElementById('ogt-cc');
+        el.classList.add('open');
+        el.onclick = onCreatorClick;
+        el.oninput = (e) => { const k = e.target.dataset.cc; if (k) cc[k] = e.target.value; };
+        renderCreator();
+    }
+    const closeCreator = () => { cc = null; document.getElementById('ogt-cc')?.classList.remove('open'); };
+
+    function renderCreator() {
+        const el = document.getElementById('ogt-cc');
+        if (!el || !cc) return;
+        const cls = CLASSES.find((c) => c.id === cc.classId);
+        let body;
+        if (cc.step === 1) {
+            body = `<div class="cc-grid">${CLASSES.map((c) => `
+                <div class="cc-class ${c.id === cc.classId ? 'sel' : ''}" data-cc-act="pick" data-id="${c.id}">
+                    <div class="cc-cname">${esc(c.name)}</div><div class="cc-tag">${esc(c.tag)}</div>
+                    <div class="cc-stats"><b>${c.hp}</b> HP · <b>${c.mana}</b> Mana</div>
+                    <div class="cc-skills">${c.skills.map(([n, r]) => `${esc(n)} ${r}`).join(' · ')}</div>
+                </div>`).join('')}</div>
+                ${cls ? `<div class="cc-traits"><b>${esc(cls.name)}:</b> ${esc(cls.traits)}</div>` : ''}`;
+        } else {
+            const owned = new Set(cls.skills.map(([n]) => n));
+            body = `<div class="ogt-form">
+                <label>Name<input data-cc="name" type="text" value="${esc(cc.name)}"></label>
+                <label>Portrait URL (optional)<input data-cc="avatar" type="text" value="${esc(cc.avatar)}" placeholder="Leave blank to use your persona image"></label>
+                <label>Backstory (shared with the narrator)<textarea data-cc="backstory" rows="4" placeholder="Where you're from, what drives you, what you're running from…">${esc(cc.backstory)}</textarea></label>
+            </div>
+            <div class="ogt-section">BONUS SKILL (OPTIONAL, RANK 1)</div>
+            <div class="ogt-chips">${PRESET_SKILLS.filter(([n]) => !owned.has(n)).map(([n, d]) =>
+                `<button class="ogt-chip ${cc.bonus === n ? 'sel' : ''}" data-cc-act="bonus" data-name="${esc(n)}" title="${esc(d)}">${esc(n)}</button>`).join('')}</div>
+            <div class="cc-traits">${esc(cls.name)} · ${cls.hp} HP · ${cls.mana} Mana · starts with ${cls.skills.map(([n, r]) => `${esc(n)} ${r}`).join(', ')}</div>`;
+        }
+        const fresh = !getState().created;
+        el.innerHTML = `<div class="cc-modal">
+            <div class="cc-head"><span class="cc-title">Create your character</span><button class="ogt-btn small" data-cc-act="close">✕</button></div>
+            ${fresh ? '' : `<div class="cc-warn">Re-creating resets level, XP, HP/Mana and skills. Quests and relationships are kept.</div>`}
+            <div class="cc-steps"><span class="${cc.step === 1 ? 'on' : ''}">1 · Class</span><span class="${cc.step === 2 ? 'on' : ''}">2 · Identity</span></div>
+            <div class="cc-body">${body}</div>
+            <div class="cc-foot">
+                ${cc.step === 2 ? `<button class="ogt-btn" data-cc-act="back">Back</button>` : '<span></span>'}
+                ${cc.step === 1 ? `<button class="ogt-btn ogt-spend" data-cc-act="next" ${cls ? '' : 'disabled'}>Next ›</button>`
+                    : `<button class="ogt-btn ogt-spend" data-cc-act="finish">Begin adventure</button>`}
+            </div></div>`;
+    }
+
+    function finishCreator() {
+        const cls = CLASSES.find((c) => c.id === cc.classId);
+        if (!cls) return;
+        const s = getState();
+        Object.assign(s, {
+            name: cc.name.trim() || s.name, class: cls.name, avatar: cc.avatar.trim(), backstory: cc.backstory.trim(),
+            traits: cls.traits, growth: { hp: cls.grow[0], mana: cls.grow[1] },
+            level: 1, xp: 0, hp: cls.hp, hpMax: cls.hp, mana: cls.mana, manaMax: cls.mana,
+            skills: [], skillPoints: 0, created: true,
+        });
+        for (const [n, r] of cls.skills) addSkill(s, n, presetDesc(n), { base: r });
+        if (cc.bonus) addSkill(s, cc.bonus, presetDesc(cc.bonus), { base: 1 });
+        closeCreator();
+        persist({ manual: true });
+        window.toastr?.success(`${s.name} the ${cls.name} is ready.`, "Old Greg's Tavern");
+    }
+
+    function onCreatorClick(e) {
+        const t = e.target.closest('[data-cc-act]');
+        if (e.target.id === 'ogt-cc') return closeCreator();
+        if (!t || !cc) return;
+        switch (t.dataset.ccAct) {
+            case 'close': return closeCreator();
+            case 'pick': cc.classId = t.dataset.id; cc.bonus = ''; return renderCreator();
+            case 'next': if (cc.classId) { cc.step = 2; renderCreator(); } return;
+            case 'back': cc.step = 1; return renderCreator();
+            case 'bonus': cc.bonus = cc.bonus === t.dataset.name ? '' : t.dataset.name; return renderCreator();
+            case 'finish': return finishCreator();
+        }
     }
 
     function skillHtml(k, pts, max) {
@@ -597,6 +710,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             case 'q-fail': if (q) q.status = 'failed'; return persist({ manual: true });
             case 'q-reopen': if (q) q.status = 'active'; return persist({ manual: true });
             case 'q-del': state.quests = state.quests.filter((x) => x !== q); return persist({ manual: true });
+            case 'open-creator': return openCreator();
             case 'goto-skills': activeTab = 'skills'; return render();
             case 'skill-up': {
                 if (!skill || skill.rank >= maxRank) return;
@@ -621,9 +735,9 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
                 return persist({ manual: true });
             }
             case 'skill-respec':
-                if (confirm('Refund all spent skill points and forget every skill?')) {
-                    state.skills.forEach((k) => { state.skillPoints += spentOn(k); });
-                    state.skills = [];
+                if (confirm('Refund all spent skill points? Class and story-granted skills keep their free ranks; skills you bought are forgotten.')) {
+                    state.skills.forEach((k) => { state.skillPoints += spentOn(k); k.rank = Math.max(1, k.base || 0); });
+                    state.skills = state.skills.filter((k) => (k.base || 0) > 0);
                     return persist({ manual: true });
                 }
                 return;

@@ -157,6 +157,25 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 .ogt-chip:hover:not(:disabled) { border-color: var(--ogt-gold); }
 .ogt-btn:disabled, .ogt-chip:disabled { opacity: .35; cursor: not-allowed; }
 .ogt-spend { border-color: #1f6b3d; color: var(--ogt-green); background: #0d1f14; }
+/* dice roll card (inserted above a reply) */
+.ogt-roll { --c: #8d8678; display: flex; align-items: center; gap: 12px; margin: 4px 0 12px; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--c);
+    background: linear-gradient(90deg, color-mix(in srgb, var(--c) 18%, #0b0b0d), #0b0b0d); animation: ogt-pop .45s ease-out; }
+.ogt-roll .ogt-die { flex: 0 0 auto; width: 42px; height: 46px; display: flex; align-items: center; justify-content: center; font: 24px 'Pirata One', serif; color: var(--c);
+    background: color-mix(in srgb, var(--c) 14%, #0b0b0d); clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+.ogt-roll-main { flex: 1; min-width: 0; }
+.ogt-roll-title { font-weight: 600; font-size: 14px; color: #f1efe9; }
+.ogt-roll-title span { font-weight: 400; color: #8d8678; }
+.ogt-roll-math { font-size: 12px; color: #a39d90; margin-top: 2px; } .ogt-roll-math b { color: #f1efe9; }
+.ogt-roll-out { flex: 0 0 auto; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; font-weight: 700; color: var(--c); text-align: right; }
+.ogt-roll.out-crit { --c: #e9b872; box-shadow: 0 0 18px rgba(233, 184, 114, .35); }
+.ogt-roll.out-strong, .ogt-roll.out-success { --c: #4ade80; }
+.ogt-roll.out-fail { --c: #fb923c; } .ogt-roll.out-badfail { --c: #f87171; }
+.ogt-roll.out-critfail { --c: #ef4444; box-shadow: 0 0 18px rgba(239, 68, 68, .35); }
+@keyframes ogt-pop { from { opacity: 0; transform: translateY(-6px) scale(.97); } to { opacity: 1; transform: none; } }
+.ogt-roll:hover .ogt-die, .ogt-roll .ogt-die { animation: ogt-spin .6s ease-out; }
+@keyframes ogt-spin { from { transform: rotate(-180deg) scale(.6); } to { transform: none; } }
+@media (max-width: 500px) { .ogt-roll { flex-wrap: wrap; } .ogt-roll-out { width: 100%; text-align: left; } }
+
 /* character creator modal */
 #ogt-cc { display: none; position: fixed; inset: 0; z-index: 4000; background: rgba(0, 0, 0, .7); backdrop-filter: blur(4px); align-items: center; justify-content: center; padding: 12px; box-sizing: border-box; }
 #ogt-cc.open { display: flex; }

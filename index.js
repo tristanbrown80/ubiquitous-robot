@@ -34,6 +34,7 @@
         pointsPerLevel: 2,
         skillMaxRank: 5,
         modelUnlockSkills: true,
+        dice: true,
     };
 
     // base XP by quest difficulty — the model only picks the difficulty, the extension pays out
@@ -286,17 +287,25 @@
             lastStatus = 'Last reply had NO tracker tag' + (s.autoScan ? ' — auto-scanning…' : '.');
             console.warn(`[${MODULE}] no OGT tag in reply`, msg.mes.slice(-200));
             if (s.autoScan) setTimeout(() => scanStory({ silent: true }), 1500);
+            pendingRoll = null; refreshPrompt();
             return render();
         }
         lastStatus = 'Last reply: tracker tag found and applied.';
 
         const state = getState();
         const notes = [];
-        for (const d of parseTags(msg.mes)) notes.push(...applyDelta(state, d));
+        const deltas = parseTags(msg.mes);
+        for (const d of deltas) notes.push(...applyDelta(state, d));
 
         msg.mes = msg.mes.replace(TAG_RE, '').trimEnd();
         msg.extra = msg.extra || {};
         msg.extra.ogt_snap = clone(state);
+
+        const rollReq = deltas.find((d) => d?.roll)?.roll;
+        const roll = s.dice ? resolveRoll(rollReq, pendingRoll, state) : null;
+        if (roll) msg.extra.ogt_roll = roll; else delete msg.extra.ogt_roll;
+        pendingRoll = null;
+        scheduleDecorate();
 
         try { c.updateMessageBlock?.(id, msg); } catch (e) { /* message may not be rendered yet */ }
         c.saveChat?.();
@@ -335,7 +344,7 @@ ${settings().trackRel ? ' "rel":{"Vex Nightshade":{"delta":5,"note":"short reaso
            "complete":["short_id"],"fail":["short_id"]}}
 Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS (hp negative for damage, positive for healing). ${settings().xpMode === 'quests'
     ? 'Do NOT award xp yourself — the game pays XP automatically when a quest is completed. When a quest begins, pick its "difficulty" honestly relative to the player\'s level (trivial: errand; easy: minor risk; medium: real danger or effort; hard: serious threat; deadly: likely lethal). Add "milestone":true to a quest update only when a major objective step is genuinely finished (max 3 per quest). Put a quest id in "complete" only when its goal is fully achieved.'
-    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes. Valid JSON only, on a single line.${extra ? '\n' + extra : ''}`;
+    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes. Valid JSON only, on a single line.${extra ? '\n' + extra : ''}${diceBlock(s)}`;
     }
 
     function refreshPrompt() {
@@ -448,6 +457,86 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
             <button class="ogt-btn ogt-wide" data-ogt-act="add-quest">Add quest</button></div>`;
         return h;
     }
+
+    // ───────────────────────── dice rolls ─────────────────────────
+    // The game rolls two d20s BEFORE each generation and hands them to the model (so it can't fudge).
+    // The model chooses skill / DC / modifiers; we recompute the result from your real skill ranks and show a card.
+
+    let pendingRoll = null;
+    const d20 = () => { const b = new Uint32Array(1); crypto.getRandomValues(b); return (b[0] % 20) + 1; };
+    const OUTCOMES = {
+        crit: 'Critical Success', strong: 'Strong Success', success: 'Success',
+        fail: 'Failure', badfail: 'Bad Failure', critfail: 'Critical Failure',
+    };
+
+    function findSkill(s, name) {
+        const q = slug(name || '');
+        if (!q) return null;
+        return s.skills.find((k) => k.id === q) || s.skills.find((k) => k.id.includes(q) || q.includes(k.id)) || null;
+    }
+
+    function resolveRoll(r, dice, s) {
+        if (!r || typeof r !== 'object' || !dice) return null;
+        const dc = clamp(Math.round(num(r.dc, 12)), 5, 30);
+        const mod = clamp(Math.round(num(r.mod, 0)), -5, 5);
+        const adv = Math.sign(num(r.adv, 0));
+        const nat = adv > 0 ? Math.max(dice.a, dice.b) : adv < 0 ? Math.min(dice.a, dice.b) : dice.a;
+        const sk = findSkill(s, r.skill);
+        const bonus = sk ? sk.rank : 0;
+        const total = nat + bonus + mod;
+        const outcome = nat === 20 ? 'crit' : nat === 1 ? 'critfail'
+            : total >= dc ? (total >= dc + 5 ? 'strong' : 'success') : (total <= dc - 5 ? 'badfail' : 'fail');
+        return {
+            skill: sk?.name || String(r.skill || 'Unskilled').slice(0, 30), trained: !!sk,
+            bonus, mod, adv, dice: [dice.a, dice.b], nat, total, dc, outcome, why: String(r.why || '').slice(0, 80),
+        };
+    }
+
+    function diceBlock(s) {
+        if (!settings().dice || !pendingRoll) return '';
+        const sheet = s.skills.length ? s.skills.map((k) => `${k.name} +${k.rank}`).join(', ') : 'none (all checks are +0)';
+        return `
+
+[Dice — rolled by the game for this turn. Do not reroll, invent or alter them.]
+d20 #1 = ${pendingRoll.a}, d20 #2 = ${pendingRoll.b}
+When the player's action has real uncertainty AND a meaningful consequence for failing (an attack, sneaking past someone, persuading a resistant NPC, climbing, picking a lock, casting under pressure…), resolve it as ONE skill check. Safe, trivial or purely conversational actions need no roll.
+1. Choose the best-fitting skill from the player's sheet (bonus = its rank; no fitting skill = +0). Player skills: ${sheet}.
+2. Choose a DC: 8 easy, 12 routine, 15 moderate, 18 hard, 22 heroic. For strong situational factors add "mod" (-5..+5), and "adv":1 for advantage / -1 for disadvantage.
+3. nat = die #1 (advantage: the higher die; disadvantage: the lower). total = nat + skill bonus + mod. Natural 20 always succeeds, natural 1 always fails; otherwise total >= DC succeeds. Beating the DC by 5+ is a strong success; missing by 5+ is a bad failure.
+4. Narrate the outcome honestly and let it matter. Never fudge the result and never state the numbers in prose — the game shows the roll.
+5. Report it in the tag: "roll":{"skill":"Stealth","dc":15,"mod":0,"adv":0,"why":"slip past the guards"}. At most one roll per turn; omit "roll" if no check was warranted.`;
+    }
+
+    function rollHtml(r) {
+        const sign = (n) => (n >= 0 ? `+ ${n}` : `− ${Math.abs(n)}`);
+        const diceTxt = r.adv ? `d20 [${r.dice[0]}, ${r.dice[1]}] → ${r.nat} (${r.adv > 0 ? 'adv' : 'dis'})` : `d20 ${r.nat}`;
+        const parts = [diceTxt, `${sign(r.bonus)} ${r.trained ? 'skill' : 'untrained'}`];
+        if (r.mod) parts.push(`${sign(r.mod)} situation`);
+        return `<div class="ogt-roll out-${r.outcome}" data-sig="${esc(JSON.stringify(r))}">
+            <div class="ogt-die">${r.nat}</div>
+            <div class="ogt-roll-main">
+                <div class="ogt-roll-title">${esc(r.skill)} check${r.why ? `<span> · ${esc(r.why)}</span>` : ''}</div>
+                <div class="ogt-roll-math">${parts.join(' ')} = <b>${r.total}</b> vs DC ${r.dc}</div>
+            </div>
+            <div class="ogt-roll-out">${OUTCOMES[r.outcome]}</div>
+        </div>`;
+    }
+
+    /** Idempotently put a roll card above each message that has one (DOM only — never saved into the chat text). */
+    function decorateRolls() {
+        const c = ctx();
+        const on = settings().enabled && settings().dice;
+        document.querySelectorAll('#chat .mes').forEach((el) => {
+            const roll = on ? c.chat[+el.getAttribute('mesid')]?.extra?.ogt_roll : null;
+            const cur = el.querySelector('.ogt-roll');
+            if (!roll) { cur?.remove(); return; }
+            if (cur && cur.dataset.sig === JSON.stringify(roll)) return;
+            cur?.remove();
+            el.querySelector('.mes_text')?.insertAdjacentHTML('beforebegin', rollHtml(roll));
+        });
+    }
+    let decorateTimer = null;
+    const scheduleDecorate = () => { clearTimeout(decorateTimer); decorateTimer = setTimeout(decorateRolls, 80); };
 
     // ───────────────────────── character creator ─────────────────────────
 
@@ -603,6 +692,7 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
             ${chk('trackRel', 'Track NPC relationship scores')}
             <label class="ogt-field">Panel side<select data-ogt-setting="panelSide"><option value="left" ${s.panelSide === 'left' ? 'selected' : ''}>Left</option><option value="right" ${s.panelSide === 'right' ? 'selected' : ''}>Right</option></select></label>
             ${meguminDetected() ? `<div class="ogt-empty">Megumin Suite detected. Let it handle prose, memory, NPC dossiers and images; this panel covers the RPG sheet, quests and relationship scores. If you'd rather use only Megumin's NPC tracking, untick "Track NPC relationship scores".</div>` : ''}
+            ${chk('dice', 'Dice rolls: skill checks with roll cards')}
             ${chk('autoScan', 'Auto-scan story when a reply has no tracker tag (extra API call)')}
             <div class="ogt-empty">${esc(lastStatus)}</div>
             <label class="ogt-field">Injection depth<input type="number" min="0" max="20" data-ogt-setting="depth" value="${s.depth}"></label>
@@ -779,6 +869,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
         const s = settings();
         document.body.classList.toggle('ogt-theme', !!(s.enabled && s.theme));
         document.body.classList.toggle('ogt-right', s.panelSide === 'right');
+        scheduleDecorate();
     }
 
     function onChange(e) {
@@ -826,8 +917,16 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
         eventSource.on(eventTypes.GENERATION_STARTED, (type, _p, dry) => {
             if (dry) return;
             if (type === 'swipe' || type === 'regenerate') syncFromChat(true);
+            // fresh dice for every real reply (not for quiet scans, impersonation or continues)
+            if (settings().dice && [undefined, '', 'normal', 'regenerate', 'swipe'].includes(type)) {
+                pendingRoll = { a: d20(), b: d20() };
+            }
             refreshPrompt();
         });
+        eventSource.on(eventTypes.CHAT_CHANGED, scheduleDecorate);
+        eventSource.on(eventTypes.MESSAGE_SWIPED, scheduleDecorate);
+        const chatEl = document.getElementById('chat');
+        if (chatEl) new MutationObserver(scheduleDecorate).observe(chatEl, { childList: true, subtree: true });
         syncFromChat();
         console.log(`[${MODULE}] loaded`);
     }

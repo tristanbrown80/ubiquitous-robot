@@ -141,6 +141,11 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 .ogt-quest-title { font: 17px 'Pirata One', serif; color: var(--ogt-green); }
 .ogt-quest.done .ogt-quest-title { text-decoration: line-through; }
 .ogt-quest-btns { display: flex; gap: 4px; }
+.ogt-quest-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.ogt-badge { font-size: 9px; letter-spacing: .1em; text-transform: uppercase; font-weight: 700; padding: 2px 7px; border-radius: 99px; border: 1px solid currentColor; }
+.ogt-badge.d-trivial { color: #9ca3af; } .ogt-badge.d-easy { color: #4ade80; } .ogt-badge.d-medium { color: #e9b872; }
+.ogt-badge.d-hard { color: #fb923c; } .ogt-badge.d-deadly { color: #f87171; }
+.ogt-xpchip { font-size: 10px; color: var(--ogt-dim); padding: 2px 0; }
 .ogt-quest-desc { margin-top: 4px; color: #cfc7b8; }
 .ogt-quest-prog { margin-top: 4px; color: var(--ogt-gold); font-size: 12px; }
 
@@ -152,7 +157,7 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 
 .ogt-form { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .ogt-form label, .ogt-field { display: flex; flex-direction: column; gap: 2px; font-size: 10px; color: var(--ogt-dim); text-transform: uppercase; letter-spacing: .06em; margin-top: 6px; }
-#ogt-panel input[type=text], #ogt-panel input[type=number], #ogt-panel input:not([type]), #ogt-panel textarea {
+#ogt-panel input[type=text], #ogt-panel input[type=number], #ogt-panel input:not([type]), #ogt-panel textarea, #ogt-panel select {
     background: #0f0f0f; color: var(--ogt-text); border: 1px solid #2c2c2c; border-radius: 6px; padding: 6px 8px; font-size: 12px; width: 100%; box-sizing: border-box;
 }
 .ogt-addrow { display: flex; gap: 6px; margin-top: 4px; }

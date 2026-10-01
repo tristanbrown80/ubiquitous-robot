@@ -29,7 +29,14 @@
         autoScan: true,
         trackRel: true,
         panelSide: 'left',
+        xpMode: 'quests', // quests = only quest rewards give XP | mixed = quests + small ad-hoc XP | free = model decides
+        xpMult: 1,
     };
+
+    // base XP by quest difficulty — the model only picks the difficulty, the extension pays out
+    const DIFFICULTY = { trivial: 5, easy: 10, medium: 20, hard: 35, deadly: 60 };
+    const MILESTONE_SHARE = 0.2, MILESTONE_MAX = 3, MIXED_CAP = 8;
+    const normDiff = (d) => (DIFFICULTY[String(d || '').toLowerCase()] ? String(d).toLowerCase() : 'medium');
 
     /** Is Megumin Suite (or similar preset/NPC suite) installed? Used only for a hint in the UI. */
     const meguminDetected = () => Object.keys(ctx().extensionSettings || {}).some((k) => /megumin/i.test(k));
@@ -58,7 +65,7 @@
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const num = (v, d = 0) => (Number.isFinite(+v) ? +v : d);
     const clone = (o) => JSON.parse(JSON.stringify(o));
-    const xpNeeded = (lvl) => 15 * lvl;
+    const xpNeeded = (lvl) => 30 * lvl;
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const tierOf = (v) => TIERS.reduce((t, [min, label]) => (v >= min ? label : t), TIERS[0][1]);
 
@@ -113,6 +120,36 @@
 
     // ───────────────────────── applying model updates ─────────────────────────
 
+    /** Add XP (scaled by the XP multiplier unless raw) and process level-ups. */
+    function gainXp(s, amount, notes, label = '') {
+        const gained = Math.round(amount * num(settings().xpMult, 1));
+        if (gained <= 0) return 0;
+        s.xp += gained;
+        notes.push(['info', `+${gained} XP${label ? ' — ' + label : ''}`]);
+        while (s.xp >= xpNeeded(s.level)) {
+            s.xp -= xpNeeded(s.level);
+            s.level += 1;
+            s.hpMax += 5; s.manaMax += 2;
+            s.hp = s.hpMax; s.mana = s.manaMax;
+            notes.push(['success', `Level up! ${s.name} is now level ${s.level}.`]);
+        }
+        return gained;
+    }
+
+    const questReward = (q) => num(q.xp, DIFFICULTY[normDiff(q.difficulty)]);
+
+    /** Mark a quest done and pay its reward once (re-opening and re-completing never double-pays). */
+    function completeQuest(s, q, notes) {
+        if (q.status === 'done') return;
+        q.status = 'done';
+        notes.push(['success', `Quest complete: ${q.title}`]);
+        if (!q.awarded) {
+            q.awarded = true;
+            const rest = Math.max(0, questReward(q) - num(q.paid, 0));
+            gainXp(s, rest, notes, q.title);
+        }
+    }
+
     function applyDelta(s, d) {
         const notes = [];
         if (typeof d !== 'object' || !d) return notes;
@@ -122,16 +159,10 @@
         if (d.mana) s.mana = clamp(s.mana + num(d.mana), 0, s.manaMax);
 
         if (d.xp) {
-            const gained = num(d.xp);
-            s.xp += gained;
-            if (gained > 0) notes.push(['info', `+${gained} XP`]);
-            while (s.xp >= xpNeeded(s.level)) {
-                s.xp -= xpNeeded(s.level);
-                s.level += 1;
-                s.hpMax += 5; s.manaMax += 2;
-                s.hp = s.hpMax; s.mana = s.manaMax;
-                notes.push(['success', `Level up! ${s.name} is now level ${s.level}.`]);
-            }
+            const mode = settings().xpMode;
+            if (mode === 'free') gainXp(s, num(d.xp), notes);
+            else if (mode === 'mixed') gainXp(s, clamp(num(d.xp), 0, MIXED_CAP), notes);
+            // 'quests' mode: loose XP from the model is ignored
         }
 
         if (d.scene && typeof d.scene === 'object') {
@@ -163,6 +194,7 @@
                 s.quests.push({
                     id: a.id || `q${Date.now().toString(36)}${s.quests.length}`,
                     title: String(a.title), desc: String(a.desc || ''), progress: '', status: 'active',
+                    difficulty: normDiff(a.difficulty), xp: DIFFICULTY[normDiff(a.difficulty)], paid: 0, ms: 0, awarded: false,
                 });
                 notes.push(['info', `New quest: ${a.title}`]);
             }
@@ -171,10 +203,16 @@
                 if (!t) continue;
                 if (u.progress) t.progress = String(u.progress);
                 if (u.desc) t.desc = String(u.desc);
+                if (u.milestone && t.status === 'active' && (t.ms || 0) < MILESTONE_MAX) {
+                    t.ms = (t.ms || 0) + 1;
+                    const part = Math.round(questReward(t) * MILESTONE_SHARE);
+                    t.paid = (t.paid || 0) + part; // deducted from the final payout
+                    gainXp(s, part, notes, `${t.title} (milestone)`);
+                }
             }
             for (const ref of q.complete || []) {
                 const t = find(ref);
-                if (t && t.status !== 'done') { t.status = 'done'; notes.push(['success', `Quest complete: ${t.title}`]); }
+                if (t) completeQuest(s, t, notes);
             }
             for (const ref of q.fail || []) {
                 const t = find(ref);
@@ -232,7 +270,7 @@
             hp: `${s.hp}/${s.hpMax}`, mana: `${s.mana}/${s.manaMax}`,
             scene: s.scene,
             relationships: !settings().trackRel ? undefined : Object.fromEntries(Object.entries(s.rel).map(([n, r]) => [n, `${r.value} (${tierOf(r.value)})${r.note ? ' - ' + r.note : ''}`])),
-            quests: s.quests.filter((q) => q.status === 'active').map((q) => ({ id: q.id, title: q.title, desc: q.desc, progress: q.progress })),
+            quests: s.quests.filter((q) => q.status === 'active').map((q) => ({ id: q.id, title: q.title, desc: q.desc, progress: q.progress, difficulty: q.difficulty, reward: `${questReward(q)} XP` })),
         };
         const extra = settings().extraRules?.trim();
         return `[Game tracker — out-of-character system rules. Never mention or quote this block in the story.]
@@ -244,12 +282,14 @@ Honour this state in the narrative (injured characters act injured, NPC attitude
 At the very END of EVERY reply, after all narrative, append exactly ONE hidden HTML comment with only the values that CHANGED this turn:
 <!--OGT:{...json...}-->
 Schema (omit anything unchanged; use {} content only if nothing changed — or omit the comment):
-{"hp":-3,"mana":-1,"xp":10,"class":"Death Knight",
+{"hp":-3,"mana":-1,${settings().xpMode === 'quests' ? '' : '"xp":5,'}"class":"Death Knight",
  "scene":{"region":"King's Highway","location":"North of Crosshaven Gate","time":"Morning"},
-${settings().trackRel ? ' "rel":{"Vex Nightshade":{"delta":5,"note":"short reason / how they feel"}},\n' : ''} "quests":{"add":[{"id":"short_id","title":"Quest title","desc":"one line objective"}],
-           "update":[{"id":"short_id","progress":"what's done / what's next"}],
+${settings().trackRel ? ' "rel":{"Vex Nightshade":{"delta":5,"note":"short reason / how they feel"}},\n' : ''} "quests":{"add":[{"id":"short_id","title":"Quest title","desc":"one line objective","difficulty":"trivial|easy|medium|hard|deadly"}],
+           "update":[{"id":"short_id","progress":"what's done / what's next","milestone":true}],
            "complete":["short_id"],"fail":["short_id"]}}
-Rules: hp/mana/xp are DELTAS (hp negative for damage, positive for healing). Award xp (roughly 3–25) only for meaningful achievements.${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''} Always keep "scene" current when location or time of day changes. Valid JSON only, on a single line.${extra ? '\n' + extra : ''}`;
+Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS (hp negative for damage, positive for healing). ${settings().xpMode === 'quests'
+    ? 'Do NOT award xp yourself — the game pays XP automatically when a quest is completed. When a quest begins, pick its "difficulty" honestly relative to the player\'s level (trivial: errand; easy: minor risk; medium: real danger or effort; hard: serious threat; deadly: likely lethal). Add "milestone":true to a quest update only when a major objective step is genuinely finished (max 3 per quest). Put a quest id in "complete" only when its goal is fully achieved.'
+    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''} Always keep "scene" current when location or time of day changes. Valid JSON only, on a single line.${extra ? '\n' + extra : ''}`;
     }
 
     function refreshPrompt() {
@@ -334,6 +374,9 @@ Rules: hp/mana/xp are DELTAS (hp negative for damage, positive for healing). Awa
             : `<button class="ogt-btn small" data-ogt-act="q-reopen" title="Reopen">↺</button>`;
         return `<div class="ogt-quest ${q.status}" data-qid="${esc(q.id)}">
             <div class="ogt-quest-head"><span class="ogt-quest-title">${esc(q.title)}</span><span class="ogt-quest-btns">${mark}<button class="ogt-btn small" data-ogt-act="q-del" title="Delete">🗑</button></span></div>
+            <div class="ogt-quest-meta"><span class="ogt-badge d-${normDiff(q.difficulty)}">${normDiff(q.difficulty)}</span>
+                <span class="ogt-xpchip">${q.status === 'done' ? '+' + questReward(q) + ' XP earned' : q.status === 'failed' ? 'no reward' : questReward(q) + ' XP'}</span>
+                ${(q.ms || 0) ? `<span class="ogt-xpchip">${q.ms}/${MILESTONE_MAX} milestones</span>` : ''}</div>
             ${q.desc ? `<div class="ogt-quest-desc">${esc(q.desc)}</div>` : ''}
             ${q.progress ? `<div class="ogt-quest-prog">▸ ${esc(q.progress)}</div>` : ''}
         </div>`;
@@ -346,6 +389,7 @@ Rules: hp/mana/xp are DELTAS (hp negative for damage, positive for healing). Awa
         h += active.length ? active.map(questHtml).join('') : `<div class="ogt-empty">No active quests.</div>`;
         if (rest.length) h += `<div class="ogt-section">FINISHED</div>${rest.map(questHtml).join('')}`;
         h += `<div class="ogt-form"><input id="ogt-new-q" placeholder="Quest title"><input id="ogt-new-qd" placeholder="Objective (optional)">
+            <select id="ogt-new-qdiff">${Object.entries(DIFFICULTY).map(([k, v]) => `<option value="${k}" ${k === 'medium' ? 'selected' : ''}>${k} (${v} XP)</option>`).join('')}</select>
             <button class="ogt-btn ogt-wide" data-ogt-act="add-quest">Add quest</button></div>`;
         return h;
     }
@@ -358,6 +402,11 @@ Rules: hp/mana/xp are DELTAS (hp negative for damage, positive for healing). Awa
             ${chk('inject', 'Inject tracker rules into prompt')}
             ${chk('toasts', 'Show level-up / quest toasts')}
             ${chk('theme', 'Modern Old Greg\'s chat theme')}
+            <label class="ogt-field">XP source<select data-ogt-setting="xpMode">
+                <option value="quests" ${s.xpMode === 'quests' ? 'selected' : ''}>Quests only (recommended)</option>
+                <option value="mixed" ${s.xpMode === 'mixed' ? 'selected' : ''}>Quests + small bonus XP</option>
+                <option value="free" ${s.xpMode === 'free' ? 'selected' : ''}>Model decides (no limits)</option></select></label>
+            <label class="ogt-field">XP multiplier<input type="number" step="0.25" min="0" max="10" data-ogt-setting="xpMult" value="${s.xpMult}"></label>
             ${chk('trackRel', 'Track NPC relationship scores')}
             <label class="ogt-field">Panel side<select data-ogt-setting="panelSide"><option value="left" ${s.panelSide === 'left' ? 'selected' : ''}>Left</option><option value="right" ${s.panelSide === 'right' ? 'selected' : ''}>Right</option></select></label>
             ${meguminDetected() ? `<div class="ogt-empty">Megumin Suite detected. Let it handle prose, memory, NPC dossiers and images; this panel covers the RPG sheet, quests and relationship scores. If you'd rather use only Megumin's NPC tracking, untick "Track NPC relationship scores".</div>` : ''}
@@ -401,7 +450,7 @@ Rules: hp/mana/xp are DELTAS (hp negative for damage, positive for healing). Awa
         if (!silent) window.toastr?.info('Scanning recent story…', "Old Greg's Tavern");
         const quietPrompt = `[OOC] Review the recent story and our tracked state:
 ${JSON.stringify(getState())}
-Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES missing from the tracker, using this schema (omit unchanged keys): {"hp":delta,"mana":delta,"xp":delta,"scene":{"region":"","location":"","time":""},"rel":{"NPC":{"delta":0,"note":""}},"quests":{"add":[{"id":"","title":"","desc":""}],"update":[{"id":"","progress":""}],"complete":[],"fail":[]}}. If nothing is missing reply {}.`;
+Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES missing from the tracker, using this schema (omit unchanged keys): {"hp":delta,"mana":delta,"xp":delta,"scene":{"region":"","location":"","time":""},"rel":{"NPC":{"delta":0,"note":""}},"quests":{"add":[{"id":"","title":"","desc":"","difficulty":"trivial|easy|medium|hard|deadly"}],"update":[{"id":"","progress":"","milestone":false}],"complete":[],"fail":[]}}. Leave out xp — quest rewards are paid automatically. If nothing is missing reply {}.`;
         try {
             let out;
             try { out = await c.generateQuietPrompt({ quietPrompt }); } catch { out = await c.generateQuietPrompt(quietPrompt, false, false); }
@@ -450,11 +499,19 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             case 'add-quest': {
                 const t = document.getElementById('ogt-new-q').value.trim();
                 if (!t) return;
-                state.quests.push({ id: `q${Date.now().toString(36)}`, title: t, desc: document.getElementById('ogt-new-qd').value.trim(), progress: '', status: 'active' });
+                const diff = normDiff(document.getElementById('ogt-new-qdiff').value);
+                state.quests.push({ id: `q${Date.now().toString(36)}`, title: t, desc: document.getElementById('ogt-new-qd').value.trim(), progress: '', status: 'active', difficulty: diff, xp: DIFFICULTY[diff], paid: 0, ms: 0, awarded: false });
                 document.getElementById('ogt-new-q').value = ''; document.getElementById('ogt-new-qd').value = '';
                 return persist({ manual: true });
             }
-            case 'q-done': if (q) q.status = 'done'; return persist({ manual: true });
+            case 'q-done': {
+                if (!q) return;
+                const notes = [];
+                completeQuest(state, q, notes);
+                persist({ manual: true });
+                if (settings().toasts) notes.forEach(([t, m]) => window.toastr?.[t]?.(m, "Old Greg's Tavern"));
+                return;
+            }
             case 'q-fail': if (q) q.status = 'failed'; return persist({ manual: true });
             case 'q-reopen': if (q) q.status = 'active'; return persist({ manual: true });
             case 'q-del': state.quests = state.quests.filter((x) => x !== q); return persist({ manual: true });

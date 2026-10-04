@@ -148,6 +148,8 @@
         deception: 'cha', performance: 'cha', insight: 'wis',
         // modern-day skills
         firearms: 'dex', brawling: 'str', athletics: 'str', driving: 'dex', hacking: 'int', investigation: 'int', mechanics: 'int', streetwise: 'cha',
+        // slice-of-life / social skills
+        charm: 'cha', leadership: 'cha', composure: 'con', academics: 'int', artistry: 'cha', tech_savvy: 'int',
     };
     const AB_FULL = { str: 'Strength', dex: 'Dexterity', con: 'Constitution', int: 'Intelligence', wis: 'Wisdom', cha: 'Charisma' };
     /** How an NPC feels about the player nudges social rolls: -4 (hostile) … +4 (devoted). Only applied when the check names the NPC. */
@@ -542,7 +544,9 @@
             if (req && typeof req === 'object') {
                 const base = { mod: clamp(Math.round(num(req.mod, 0)), -5, 5), adv: Math.sign(num(req.adv, 0)), why: String(req.why || '').slice(0, 80) };
                 const kind = String(req.kind || '').toLowerCase();
-                if (kind === 'attack') {
+                if ((kind === 'attack' || kind === 'defend') && !hasCombat(state)) {
+                    // a no-combat game has no combat engine; if the model asks for one anyway, drop the request instead of tracking fights
+                } else if (kind === 'attack') {
                     const spell = !!req.spell;
                     msg.extra.ogt_check = {
                         ...base, kind: 'attack', spell, target: String(req.target || 'target').slice(0, 30), dmg: spell ? String(req.dmg || '1d8') : undefined,
@@ -584,9 +588,10 @@
 
     function buildPrompt() {
         const s = getState();
+        const combat = hasCombat(s); // social genres have no HP / AC / enemies at all
         const compact = {
             player: s.name, class: s.class, level: s.level, xp: `${s.xp}/${xpNeeded(s.level)}`,
-            hp: `${s.hp}/${s.hpMax}`, mana: `${s.mana}/${s.manaMax}`,
+            hp: combat ? `${s.hp}/${s.hpMax}` : undefined, mana: combat ? `${s.mana}/${s.manaMax}` : undefined,
             scene: s.scene,
             // keep the injected state bounded as a long game accumulates NPCs / notes (most significant relationships first)
             relationships: !settings().trackRel ? undefined : Object.fromEntries(Object.entries(s.rel)
@@ -596,14 +601,14 @@
             backstory: s.backstory ? String(s.backstory).slice(0, 500) : undefined,
             skills: Object.fromEntries((s.skills || []).map((k) => [k.name, `${fmtMod(skillBonus(s, k))} (rank ${k.rank}/${settings().skillMaxRank} ${RANK_NAMES[k.rank] || ''})`])),
             abilities: Object.fromEntries(ABILITIES.map((a) => [AB_NAME[a], `${s.stats[a]} (${fmtMod(amod(s.stats[a]))})`])),
-            armor_class: computeAC(s),
+            armor_class: combat ? computeAC(s) : undefined,
             luck: settings().luckRerolls ? `${s.luck}/${s.luckMax}` : undefined,
-            gear: {
+            gear: combat ? {
                 weapon: (() => { const w = equippedOf(s, 'weapon'); return w ? `${w.name} (${w.dmg}${w.bonus ? ` +${w.bonus}` : ''}, ${AB_NAME[w.ability]})` : 'unarmed'; })(),
                 armor: equippedOf(s, 'armor')?.name || 'none', shield: equippedOf(s, 'shield')?.name || 'none',
                 pack: Object.fromEntries(s.inv.filter((i) => !i.equipped).slice(0, 25).map((i) => [i.name, i.qty])), gold: s.gold,
-            },
-            enemies: s.enemies.filter((e) => !e.defeated).map((e) => ({ name: e.name, hp: `${e.hp}/${e.hpMax}`, ac: e.ac })),
+            } : { belongings: Object.fromEntries(s.inv.slice(0, 25).map((i) => [i.name, i.qty])), [genreOf(s).terms.cash]: s.gold },
+            enemies: combat ? s.enemies.filter((e) => !e.defeated).map((e) => ({ name: e.name, hp: `${e.hp}/${e.hpMax}`, ac: e.ac })) : undefined,
             quests: s.quests.filter((q) => q.status === 'active').slice(-8).map((q) => ({ id: q.id, title: q.title, desc: String(q.desc || '').slice(0, 100), progress: String(q.progress || '').slice(0, 100), difficulty: q.difficulty, reward: `${questReward(q)} XP` })),
         };
         const extra = settings().extraRules?.trim();
@@ -611,19 +616,18 @@
 Current tracked state:
 ${JSON.stringify(compact)}
 
-${G().prompt.setting}Honour this state in the narrative (injured characters act injured, NPC attitudes match their relationship tier, active quests stay relevant). Skills are the player's real competence: rank 1 = novice, 5 = master. Let outcomes reflect them — a rank-1 skill fumbles under pressure, a rank-5 skill is reliable — and never let the player perform feats far above their rank or level without consequence. Skill ranks are raised by the player with skill points, not by you. The player's armor_class is derived from their gear and DEX; enemies must hit it. Items: use "inv.add" only for loot, rewards or purchases the player actually obtains ${G().prompt.itemRules} Use "inv.remove" when an item is lost, stolen, given away or used up in the story; the game removes potions the player drinks itself.
+${G().prompt.setting}Honour this state in the narrative (injured characters act injured, NPC attitudes match their relationship tier, active quests stay relevant). Skills are the player's real competence: rank 1 = novice, 5 = master. Let outcomes reflect them — a rank-1 skill fumbles under pressure, a rank-5 skill is reliable — and never let the player perform feats far above their rank or level without consequence. Skill ranks are raised by the player with skill points, not by you.${combat ? " The player's armor_class is derived from their gear and DEX; enemies must hit it." : ' This game has NO combat engine: there is no HP, armor class or enemy tracking, so never request attack or defend checks and never report "hp", "mana" or "enemies". If a physical scuffle erupts, handle it in the story or with a single skill check.'} Items: use "inv.add" only for loot, rewards or purchases the player actually obtains ${G().prompt.itemRules} Use "inv.remove" when an item is lost, stolen, given away or used up in the story; the game removes potions the player drinks itself.
 
 At the very END of EVERY reply, after all narrative, append exactly ONE hidden HTML comment with only the values that CHANGED this turn:
 <!--OGT:{...json...}-->
 Schema (omit anything unchanged; use {} content only if nothing changed — or omit the comment):
-{"hp":-3,"mana":-1,${settings().xpMode === 'quests' ? '' : '"xp":5,'}"class":"${G().prompt.classExample}",
+{${combat ? '"hp":-3,"mana":-1,' : ''}${settings().xpMode === 'quests' ? '' : '"xp":5,'}"class":"${G().prompt.classExample}",
  "scene":{${G().prompt.sceneExample}},
 ${settings().trackRel ? ` "rel":{"${G().prompt.npcExample}":{"delta":5,"note":"short reason / how they feel"}},\n` : ''}${settings().modelUnlockSkills ? ' "skills":{"unlock":[{"name":"Lockpicking","desc":"one line"}]},\n' : ''} "inv":${G().prompt.invExample},
- "enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":13}],"clear":true},
- "quests":{"add":[{"id":"short_id","title":"Quest title","desc":"one line objective","difficulty":"trivial|easy|medium|hard|deadly"}],
+${combat ? ` "enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":13}],"clear":true},\n` : ''} "quests":{"add":[{"id":"short_id","title":"Quest title","desc":"one line objective","difficulty":"trivial|easy|medium|hard|deadly"}],
            "update":[{"id":"short_id","progress":"what's done / what's next","milestone":true}],
            "complete":["short_id"],"fail":["short_id"]}}
-Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS (hp negative for damage, positive for healing). ${settings().xpMode === 'quests'
+Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS (hp negative for damage, positive for healing).` : (settings().xpMode === 'quests' ? '' : 'xp is a DELTA.')} ${settings().xpMode === 'quests'
     ? 'Do NOT award xp yourself — the game pays XP automatically when a quest is completed. When a quest begins, pick its "difficulty" honestly relative to the player\'s level (trivial: errand; easy: minor risk; medium: real danger or effort; hard: serious threat; deadly: likely lethal). Add "milestone":true to a quest update only when a major objective step is genuinely finished (max 3 per quest). Put a quest id in "complete" only when its goal is fully achieved.'
     : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes. Valid JSON only, on a single line.${extra ? '\n' + extra : ''}${diceBlock(s)}${resultBlock()}${notesBlock()}`;
     }
@@ -653,27 +657,34 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
             <span class="ogt-bar-val">${cur}/${max}</span></div>`;
     }
 
+    /** Does this genre use the HP / AC / enemies layer? Social genres turn it off entirely. */
+    const hasCombat = (s) => genreOf(s).combat !== false;
+
     function renderCharacter(s) {
         const av = avatarUrl(s);
+        const combat = hasCombat(s);
         const field = (k, label, type = 'number') =>
             `<label>${label}<input data-ogt-field="${k}" type="${type}" value="${esc(s[k])}"></label>`;
         let h = `<div class="ogt-card">
             <div class="ogt-portrait" style="${av ? `background-image:url('${esc(av)}')` : ''}">${av ? '' : `<span>${esc(s.name[0] || '?')}</span>`}</div>
-            <div class="ogt-ac" title="Armor Class">🛡 ${computeAC(s)}</div>
+            ${combat ? `<div class="ogt-ac" title="Armor Class">🛡 ${computeAC(s)}</div>` : ''}
             <div class="ogt-card-text"><div class="ogt-name">${esc(s.name)}</div><div class="ogt-class">${esc(s.class)}</div></div>
         </div>
         <div class="ogt-stats">
-            ${bar('HP', 'hp', s.hp, s.hpMax)}
-            ${bar(G().terms.mana.toUpperCase(), 'mana', s.mana, s.manaMax)}
+            ${combat ? `${bar('HP', 'hp', s.hp, s.hpMax)}
+            ${bar(G().terms.mana.toUpperCase(), 'mana', s.mana, s.manaMax)}` : ''}
             ${bar(`LVL ${s.level}`, 'xp', s.xp, xpNeeded(s.level))}
         </div>
         <div class="ogt-abilities">${ABILITIES.map((a) => `<div class="ogt-ab" title="${AB_NAME[a]} ${s.stats[a]}">
             <div class="n">${AB_NAME[a]}</div><div class="v">${s.stats[a]}</div><div class="m">${fmtMod(amod(s.stats[a]))}</div>
             ${s.statPoints > 0 && s.stats[a] < 20 ? `<button data-ogt-act="stat-up" data-ab="${a}" title="Spend an ability point">+</button>` : ''}</div>`).join('')}</div>
-        <div class="ogt-acrow">AC <b>${computeAC(s)}</b> · Proficiency <b>${fmtMod(profBonus(s.level))}</b> · <b>${s.gold}</b> ${G().terms.cash}${settings().luckRerolls ? ` · <span class="luck" title="Spend Luck to reroll a failed check">🍀 <b>${s.luck}/${s.luckMax}</b></span>` : ''}${s.statPoints > 0 ? ` · <span class="pts">${s.statPoints} ability point${s.statPoints === 1 ? '' : 's'}</span>` : ''}</div>`;
+        <div class="ogt-acrow">${combat ? `AC <b>${computeAC(s)}</b> · ` : ''}Proficiency <b>${fmtMod(profBonus(s.level))}</b> · <b>${s.gold}</b> ${G().terms.cash}${settings().luckRerolls ? ` · <span class="luck" title="Spend Luck to reroll a failed check">🍀 <b>${s.luck}/${s.luckMax}</b></span>` : ''}${s.statPoints > 0 ? ` · <span class="pts">${s.statPoints} ability point${s.statPoints === 1 ? '' : 's'}</span>` : ''}</div>`;
+
+        // no-combat genres: the people in your life come first, right under your stats
+        if (!combat && settings().trackRel) h += relationshipsHtml(s);
 
         const foes = s.enemies.filter((e) => !e.defeated);
-        if (s.enemies.length) {
+        if (combat && s.enemies.length) {
             h += `<div class="ogt-section">COMBAT</div>${s.enemies.map((e) => `<div class="ogt-foe ${e.defeated ? 'dead' : ''}" data-eid="${esc(e.id)}">
                 <div class="ogt-foe-head"><span>${esc(e.name)}</span><span>AC ${e.ac}</span></div>
                 <div class="ogt-bar"><div class="ogt-fill hp" style="width:${clamp((e.hp / e.hpMax) * 100, 0, 100)}%"></div></div>
@@ -701,13 +712,17 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
             h += `<div class="ogt-form">
                 ${field('name', 'Name', 'text')}${field('class', 'Class', 'text')}${field('avatar', 'Portrait URL', 'text')}
                 ${field('level', 'Level')}${field('xp', 'XP')}
-                ${field('hp', 'HP')}${field('hpMax', 'Max HP')}${field('mana', G().terms.mana)}${field('manaMax', 'Max ' + G().terms.mana.toLowerCase())}${field('luck', 'Luck')}${field('luckMax', 'Max luck')}
+                ${combat ? `${field('hp', 'HP')}${field('hpMax', 'Max HP')}${field('mana', G().terms.mana)}${field('manaMax', 'Max ' + G().terms.mana.toLowerCase())}` : ''}${field('luck', 'Luck')}${field('luckMax', 'Max luck')}
                 ${ABILITIES.map((a) => `<label>${AB_NAME[a]}<input data-ogt-stat="${a}" type="number" min="1" max="30" value="${s.stats[a]}"></label>`).join('')}
             </div>`;
         }
 
-        if (!settings().trackRel) return h;
-        h += `<div class="ogt-section">RELATIONSHIPS</div>`;
+        if (!settings().trackRel || !combat) return h; // (no-combat genres already showed relationships above)
+        return h + relationshipsHtml(s);
+    }
+
+    function relationshipsHtml(s) {
+        let h = `<div class="ogt-section">RELATIONSHIPS</div>`;
         const names = Object.keys(s.rel);
         if (!names.length) h += `<div class="ogt-empty">No one knows you yet.</div>`;
         for (const n of names) {
@@ -859,14 +874,16 @@ The check must live ONLY inside that hidden <!--OGT:…--> comment. Never write 
 - The player then clicks to roll. You will receive the result — either as a [ROLL RESULT] block or a player message beginning with [ROLL] — giving the total, the DC and the outcome (Critical Success, Strong Success, Success, Failure, Bad Failure or Critical Failure). Narrate EXACTLY that outcome honestly and let it matter; never ask for the same check again. If a result has no DC, judge the total against a fair DC for what they attempted.
 - Safe, trivial or purely conversational actions need no check — just narrate. At most one check per turn. Never state the dice numbers in your narration.${settings().luckRerolls ? '\n- Luck: the player may spend a Luck point to reroll a FAILED check before you narrate it; you only ever receive the final result (a note says if it was rerolled). Do not offer or mention rerolls yourself. Very rarely — for genuinely inspired roleplay or a heroic gamble — you may grant 1 Luck by adding "luck":1 to the tag.' : ''}
 
-${SOCIAL_RULES}
+${SOCIAL_RULES}${G().prompt.socialExtra || ''}${hasCombat(s) ? `
 
 [Combat — the game resolves every attack and tracks enemy HP]
 - Register each enemy the moment it appears, with sensible stats: <!--OGT:{"enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":13}]}}-->. Typical AC: ${G().prompt.acGuide}. Use "enemies":{"clear":true} when the fight ends.
 - When the PLAYER attacks (${G().prompt.attackWho}), stop and request: "check":{"kind":"attack","target":"${G().prompt.enemyExample}","ac":13,"why":"the attack, in a few words"} (${G().prompt.attackSpell}). The game rolls the hit and damage with their real weapon and applies it to that enemy.
 - When an ENEMY attacks the player, stop and request: "check":{"kind":"defend","enemy":"${G().prompt.enemyExample}","atk":4,"dmg":"1d6+1","why":"how it strikes"} (atk +2..+8, dmg by threat). The game rolls against the player's AC and applies the damage to their HP itself — NEVER also report "hp" for combat damage.
 - The result tells you hit/miss, damage dealt and the enemy's remaining HP. Narrate it exactly; a DEFEATED enemy is dead or out of the fight. Skill checks stay "kind":"skill" (or omit kind). One check per turn, so run a fight one attack at a time.
-- Never invent the player's gear: they carry only what the sheet's "gear" lists. Give loot/purchases with "inv.add" (and "inv.remove" when something is used up), never in prose alone.`;
+- Never invent the player's gear: they carry only what the sheet's "gear" lists. Give loot/purchases with "inv.add" (and "inv.remove" when something is used up), never in prose alone.` : `
+
+[No combat] This game has no combat rules. Never request "attack" or "defend" checks. Conflict here is social and personal: arguments, rivalries, secrets, embarrassment, loyalty and trust. Failing a check costs reputation, trust or an opportunity — it never injures anyone.`}`;
     }
 
     function diceBlock(s) {
@@ -885,7 +902,7 @@ When the player's action has real uncertainty AND a meaningful consequence for f
 4. Narrate the outcome honestly and let it matter. Never fudge the result and never state the numbers in prose — the game shows the roll.
 5. Report it inside the hidden end-of-reply tag, e.g. <!--OGT:{"roll":{"skill":"Stealth","dc":15,"mod":0,"adv":0,"why":"slip past the guards"}}-->, never as visible text. At most one roll per turn; omit "roll" if no check was warranted.
 
-${SOCIAL_RULES}`;
+${SOCIAL_RULES}${G().prompt.socialExtra || ''}`;
     }
 
     function rollHtml(r, kind = 'roll', sig = JSON.stringify(r), actions = '') {
@@ -1229,6 +1246,49 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
             { name: 'Leather Jacket', type: 'armor', ac: 12, eq: 1 }, { ...FIRSTAID, qty: 2 }] },
     };
 
+    // ── Slice of Life: a social, non-combat genre (no HP / AC / enemies) ──
+    const SLICE_SKILLS = [
+        ['Charm', 'Being liked: warmth, flirting, making a good first impression.'], ['Persuasion', 'Convincing, negotiating, talking someone round.'],
+        ['Deception', 'Lying, bluffing, spinning a story, keeping secrets.'], ['Insight', 'Reading intent, spotting lies and unspoken feelings.'],
+        ['Performance', 'Public speaking, music, acting and winning a room.'], ['Leadership', 'Rallying people, organising, getting a group moving.'],
+        ['Composure', 'Staying calm and dignified under pressure or embarrassment.'], ['Streetwise', 'Gossip, local knowledge, who knows who.'],
+        ['Intimidation', 'Presence, ultimatums, making someone back down.'], ['Academics', 'Studying, research, and knowing your subject.'],
+        ['Artistry', 'Creative work: writing, music, design, craft.'], ['Tech Savvy', 'Phones, social media, computers and gadgets.'],
+        ['Athletics', 'Sports, fitness and physical stamina.'],
+    ];
+    const SLICE_CLASSES = [
+        { id: 'socialite', name: 'Socialite', tag: 'Everyone knows your name.', hp: 20, mana: 10, grow: [0, 0], skills: [['Charm', 3], ['Persuasion', 2], ['Streetwise', 1]],
+            traits: 'Magnetic and well-connected. Walks into any room and gets noticed; knows the gossip and who to impress. Image-conscious, so a scandal or a snub stings.' },
+        { id: 'performer', name: 'Performer', tag: 'Born for the spotlight.', hp: 20, mana: 10, grow: [0, 0], skills: [['Performance', 3], ['Charm', 2], ['Artistry', 1]],
+            traits: 'Musician, actor or speaker who thrives on an audience. Can win a crowd and sway moods; craves approval and can struggle when no one is watching.' },
+        { id: 'counselor', name: 'Counselor', tag: 'The one everyone confides in.', hp: 20, mana: 10, grow: [0, 0], skills: [['Insight', 3], ['Persuasion', 2], ['Composure', 1]],
+            traits: 'Calm listener who reads people. Draws out secrets and talks others down; people trust them with things they tell no one else. Slower to push their own wants.' },
+        { id: 'overachiever', name: 'Overachiever', tag: 'Top of the class, every time.', hp: 20, mana: 10, grow: [0, 0], skills: [['Academics', 3], ['Leadership', 2], ['Composure', 1]],
+            traits: 'Driven, prepared and respected by authority. Great under formal pressure and in charge of a group; can come across as stiff or competitive.' },
+        { id: 'rebel', name: 'Rebel', tag: 'Plays by their own rules.', hp: 20, mana: 10, grow: [0, 0], skills: [['Streetwise', 3], ['Deception', 2], ['Intimidation', 1]],
+            traits: 'Outsider with an edge. Knows the back routes and the unwritten rules, bluffs well and doesn\'t scare easily; authority and the in-crowd are wary of them.' },
+        { id: 'organizer', name: 'Organizer', tag: 'Gets people moving together.', hp: 20, mana: 10, grow: [0, 0], skills: [['Leadership', 3], ['Persuasion', 2], ['Insight', 1]],
+            traits: 'Natural coordinator and team-builder. Turns a vague idea into a plan and a crowd into a crew; people follow, but they also hold them responsible.' },
+        { id: 'artist', name: 'Artist', tag: 'Sees and says what others can\'t.', hp: 20, mana: 10, grow: [0, 0], skills: [['Artistry', 3], ['Insight', 2], ['Charm', 1]],
+            traits: 'Creative and perceptive. Expresses what people feel and notices what they hide; moves hearts through their work. Can be moody and lose track of the practical.' },
+    ];
+    const SLICE_KIT = {
+        socialite: { stats: { str: 8, dex: 13, con: 10, int: 12, wis: 14, cha: 15 }, gold: 400, gear: [
+            { name: 'Smartphone', type: 'misc', desc: 'Full of contacts, always buzzing.' }, { name: 'Designer Jacket', type: 'misc' }, { name: 'Party Invitation', type: 'misc', desc: 'The right one.' }] },
+        performer: { stats: { str: 8, dex: 14, con: 13, int: 10, wis: 12, cha: 15 }, gold: 150, gear: [
+            { name: 'Smartphone', type: 'misc' }, { name: 'Instrument', type: 'misc', desc: 'Well worn, well loved.' }, { name: 'Stage Outfit', type: 'misc' }] },
+        counselor: { stats: { str: 8, dex: 10, con: 12, int: 13, wis: 15, cha: 14 }, gold: 200, gear: [
+            { name: 'Smartphone', type: 'misc' }, { name: 'Journal', type: 'misc', desc: 'Half-filled with other people\'s worries.' }, { name: 'Thermos of Tea', type: 'consumable' }] },
+        overachiever: { stats: { str: 8, dex: 10, con: 14, int: 15, wis: 12, cha: 13 }, gold: 250, gear: [
+            { name: 'Smartphone', type: 'misc' }, { name: 'Planner', type: 'misc', desc: 'Color-coded to the minute.' }, { name: 'Laptop', type: 'misc' }] },
+        rebel: { stats: { str: 8, dex: 15, con: 13, int: 10, wis: 12, cha: 14 }, gold: 80, gear: [
+            { name: 'Smartphone', type: 'misc', desc: 'Cracked screen.' }, { name: 'Leather Jacket', type: 'misc' }, { name: 'Spare Key', type: 'misc', desc: 'To a place you shouldn\'t have one for.' }] },
+        organizer: { stats: { str: 8, dex: 10, con: 13, int: 12, wis: 14, cha: 15 }, gold: 220, gear: [
+            { name: 'Smartphone', type: 'misc' }, { name: 'Clipboard', type: 'misc' }, { name: 'Group Chat Admin Rights', type: 'misc', desc: 'A small, real power.' }] },
+        artist: { stats: { str: 8, dex: 12, con: 10, int: 13, wis: 14, cha: 15 }, gold: 100, gear: [
+            { name: 'Smartphone', type: 'misc' }, { name: 'Sketchbook', type: 'misc', desc: 'Your best work is in here.' }, { name: 'Paint-Stained Hoodie', type: 'misc' }] },
+    };
+
     const GENRES = {
         fantasy: {
             id: 'fantasy', name: 'Fantasy', blurb: 'Swords, spells and ancient ruins.',
@@ -1263,6 +1323,23 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
             },
         },
     };
+    GENRES.slice = {
+        id: 'slice', name: 'Slice of Life', blurb: 'Friendships, rivalries and secrets. Social stakes — no combat.',
+        combat: false, // no HP / AC / enemies / attack rolls anywhere in the UI or prompt
+        terms: { mana: 'Energy', cash: 'cash', special: 'move' },
+        skills: SLICE_SKILLS, classes: SLICE_CLASSES, kits: SLICE_KIT,
+        prompt: {
+            setting: `[Setting] This is a contemporary slice-of-life drama: school, work, a neighbourhood, friends, family, rivals, romance, rumours and secrets. There is no magic. The stakes are social and emotional — trust, reputation, belonging, ambition, embarrassment, loyalty — and the story's drama comes from people. Keep it grounded and character-driven; let choices and relationships have lasting consequences. Money is cash (the tag's "gold" field means the player's cash).\n\n`,
+            socialExtra: `
+In this game social interaction IS the gameplay, so lean on checks more than usual — whenever someone's feelings, trust, reputation or a secret is genuinely at stake (still not for small talk). Vary the skill: Charm to be liked, Persuasion to convince, Insight to read someone, Composure to keep your cool, Deception for lies, Leadership to rally others, Performance to win a room, Intimidation to make someone back down. Always name the NPC with "npc". Failure is social, never physical: an awkward silence, a lost friend, a rumour, a rival's gain. After every meaningful exchange move the relevant relationships — swings of ±5..±20 are normal here, and a betrayal or a heartfelt moment can move more. NPCs have their own goals and memories; remember what the player has said and done.`,
+            sceneExample: `"region":"Maple Street","location":"Corner café","time":"Saturday, 4 PM"`,
+            classExample: 'Socialite', npcExample: 'Dana Whitfield', enemyExample: 'Rival',
+            invExample: `{"add":[{"name":"Concert Tickets","type":"misc","qty":2},{"name":"Iced Coffee","type":"consumable","qty":1}],"remove":[{"name":"Spare Key","qty":1}],"gold":-20}`,
+            itemRules: `(types: consumable and misc only — phones, keys, gifts, tickets, notes, clothes, tools of a hobby; there are no weapons or armor in this game). Keep items plausible for the player's means. "gold" is a cash delta.`,
+            acGuide: '(not used)', pressure: 'keeping composure or lying under pressure',
+            attackWho: '(not used)', attackSpell: '(not used)',
+        },
+    };
     const genreOf = (s) => GENRES[s?.genre] || GENRES.fantasy;
     const G = () => genreOf(getState());
     const presetDescAny = (n) => Object.values(GENRES).flatMap((g) => g.skills).find(([p]) => p === n)?.[1] || '';
@@ -1295,9 +1372,9 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
                 <div class="cc-grid">${gen.classes.map((c) => `
                 <button type="button" class="cc-class ${c.id === cc.classId ? 'sel' : ''}" data-cc-act="pick" data-id="${c.id}" aria-pressed="${c.id === cc.classId}">
                     <span class="cc-cname">${esc(c.name)}</span><span class="cc-tag">${esc(c.tag)}</span>
-                    <span class="cc-stats"><b>${c.hp}</b> HP · <b>${c.mana}</b> ${esc(gen.terms.mana)}</span>
+                    ${gen.combat === false ? '' : `<span class="cc-stats"><b>${c.hp}</b> HP · <b>${c.mana}</b> ${esc(gen.terms.mana)}</span>`}
                     <span class="cc-skills">${ABILITIES.map((a) => `${AB_NAME[a]} ${gen.kits[c.id].stats[a]}`).join(' · ')}</span>
-                    <span class="cc-skills">${gen.kits[c.id].gear.filter((g) => g.eq).map((g) => esc(g.name)).join(', ')}</span>
+                    <span class="cc-skills">${gen.kits[c.id].gear.filter((g) => gen.combat === false || g.eq).map((g) => esc(g.name)).join(', ')}</span>
                     <span class="cc-skills">${c.skills.map(([n, r]) => `${esc(n)} ${r}`).join(' · ')}</span>
                 </button>`).join('')}</div>
                 ${cls ? `<div class="cc-traits"><b>${esc(cls.name)}:</b> ${esc(cls.traits)}</div>` : ''}`;
@@ -1311,7 +1388,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
             <div class="ogt-section">BONUS SKILL (OPTIONAL, RANK 1)</div>
             <div class="ogt-chips">${gen.skills.filter(([n]) => !owned.has(n)).map(([n, d]) =>
                 `<button class="ogt-chip ${cc.bonus === n ? 'sel' : ''}" data-cc-act="bonus" data-name="${esc(n)}" title="${esc(d)}">${esc(n)}</button>`).join('')}</div>
-            <div class="cc-traits">${esc(gen.name)} · ${esc(cls.name)} · ${cls.hp} HP · ${cls.mana} ${esc(gen.terms.mana)} · starts with ${cls.skills.map(([n, r]) => `${esc(n)} ${r}`).join(', ')}</div>`;
+            <div class="cc-traits">${esc(gen.name)} · ${esc(cls.name)} · ${gen.combat === false ? '' : `${cls.hp} HP · ${cls.mana} ${esc(gen.terms.mana)} · `}starts with ${cls.skills.map(([n, r]) => `${esc(n)} ${r}`).join(', ')}</div>`;
         }
         const fresh = !getState().created;
         el.innerHTML = `<div class="cc-modal">
@@ -1425,15 +1502,17 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
     function renderGear(s) {
         const w = equippedOf(s, 'weapon'), a = equippedOf(s, 'armor'), sh = equippedOf(s, 'shield');
         const dex = amod(s.stats.dex);
-        let h = `<div class="ogt-points has"><span>${computeAC(s)}</span> Armor Class
+        const combat = hasCombat(s);
+        let h = `${combat ? `<div class="ogt-points has"><span>${computeAC(s)}</span> Armor Class
             <small>${a ? esc(a.name) : 'no armor'} ${a ? '' : '(10'} + DEX ${fmtMod(a && a.dexCap != null ? Math.min(dex, a.dexCap) : dex)}${sh ? ` + ${esc(sh.name)} ${sh.ac}` : ''}${a ? '' : ')'}</small></div>
-            <div class="ogt-acrow">Weapon: <b>${w ? `${esc(w.name)} ${w.dmg}${w.bonus ? ` +${w.bonus}` : ''}` : 'unarmed 1d2'}</b> · Attack <b>${fmtMod(attackProfile(s).bonus)}</b></div>
+            <div class="ogt-acrow">Weapon: <b>${w ? `${esc(w.name)} ${w.dmg}${w.bonus ? ` +${w.bonus}` : ''}` : 'unarmed 1d2'}</b> · Attack <b>${fmtMod(attackProfile(s).bonus)}</b></div>` : ''}
             <label class="ogt-field ogt-inline">${G().terms.cash[0].toUpperCase() + G().terms.cash.slice(1)}<input data-ogt-field="gold" type="number" min="0" value="${s.gold}"></label>`;
         const eq = s.inv.filter((i) => i.equipped), pack = s.inv.filter((i) => !i.equipped);
-        h += `<div class="ogt-section">EQUIPPED</div>${eq.length ? eq.map(itemHtml).join('') : '<div class="ogt-empty">Nothing equipped.</div>'}`;
-        h += `<div class="ogt-section">PACK</div>${pack.length ? pack.map(itemHtml).join('') : '<div class="ogt-empty">Your pack is empty.</div>'}`;
-        h += `<div class="ogt-form"><input id="ogt-new-it" placeholder="Add item name"><select id="ogt-new-ittype">${ITEM_TYPES.map((t) => `<option value="${t}">${t}</option>`).join('')}</select>
-            <input id="ogt-new-itstat" placeholder="Stat: weapon dice (1d8), armor AC (14), potion heal (2d4+2)">
+        if (combat) h += `<div class="ogt-section">EQUIPPED</div>${eq.length ? eq.map(itemHtml).join('') : '<div class="ogt-empty">Nothing equipped.</div>'}`;
+        h += `<div class="ogt-section">${combat ? 'PACK' : 'BELONGINGS'}</div>${(combat ? pack : s.inv).length ? (combat ? pack : s.inv).map(itemHtml).join('') : '<div class="ogt-empty">Nothing yet.</div>'}`;
+        const types = combat ? ITEM_TYPES : ['consumable', 'misc'];
+        h += `<div class="ogt-form"><input id="ogt-new-it" placeholder="Add item name"><select id="ogt-new-ittype">${types.map((t) => `<option value="${t}">${t}</option>`).join('')}</select>
+            ${combat ? '<input id="ogt-new-itstat" placeholder="Stat: weapon dice (1d8), armor AC (14), potion heal (2d4+2)">' : '<input id="ogt-new-itstat" type="hidden">'}
             <button class="ogt-btn ogt-wide" data-ogt-act="item-add">Add item</button></div>`;
         return h;
     }
@@ -1621,7 +1700,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
                 if (item.heal) { const before = state.hp; state.hp = Math.min(state.hpMax, state.hp + rollDice(parseDice(item.heal)).total); parts.push(`restored ${state.hp - before} HP`); }
                 if (item.mana) { const before = state.mana; state.mana = Math.min(state.manaMax, state.mana + rollDice(parseDice(item.mana)).total); parts.push(`restored ${state.mana - before} ${G().terms.mana.toLowerCase()}`); }
                 removeItem(state, name, 1);
-                const text = `${state.name} used ${name}${parts.length ? ': ' + parts.join(', ') : ''} (HP ${state.hp}/${state.hpMax}, ${G().terms.mana} ${state.mana}/${state.manaMax}).`;
+                const text = `${state.name} used ${name}${parts.length ? ': ' + parts.join(', ') : ''} ${hasCombat(state) ? ` (HP ${state.hp}/${state.hpMax}, ${G().terms.mana} ${state.mana}/${state.manaMax})` : ''}.`;
                 pushNote(text);
                 window.toastr?.success(text, APP_NAME);
                 return persist({ manual: true });

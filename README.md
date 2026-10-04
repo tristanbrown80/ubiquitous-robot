@@ -5,10 +5,13 @@ lets you roll your own dice, and gives the chat a modern look. Everything is sto
 
 ## Features
 
-- **Genres** — pick **Fantasy** or **Modern** in the character creator. Each has its own classes, starting kits,
-  skill list and wording (Mana ↔ Focus, gold ↔ cash), and the narrator is told the setting. More genres are just data.
+- **Genres** — pick one in the character creator. Each has its own classes, starting kits, skill list and
+  wording (Mana ↔ Focus ↔ Energy, gold ↔ cash), and the narrator is told the setting. More genres are just data.
   - Fantasy: Warrior, Rogue, Mage, Cleric, Ranger, Bard, Death Knight
   - Modern: Soldier, Detective, Hacker, Medic, Fixer, Driver, Brawler (firearms, vehicles, hacking; no magic)
+  - Slice of Life: Socialite, Performer, Counselor, Overachiever, Rebel, Organizer, Artist — a **no-combat**
+    genre. HP, armor, weapons and enemies disappear entirely; conflict is social checks and relationships
+    (which move up front in the panel), and failure costs trust or reputation, never health.
 - **Character sheet** — class, level and XP, HP / Mana-or-Focus, six D&D-style ability scores, derived Armor Class,
   Luck points. Built with the **character creator**.
 - **Quests & XP** — the narrator picks a difficulty; the game pays the XP when a quest completes (with optional milestones).

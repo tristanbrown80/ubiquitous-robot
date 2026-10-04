@@ -280,9 +280,11 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 .cc-warn { margin: 0 16px; padding: 6px 10px; border-radius: 6px; background: #2a1810; color: #fca5a5; font-size: 12px; }
 .cc-steps { display: flex; gap: 14px; padding: 8px 16px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--ogt-dim); }
 .cc-steps .on { color: var(--ogt-green); }
-.cc-body { padding: 4px 16px 12px; overflow-y: auto; }
+.cc-body { padding: 4px 16px 12px; overflow-y: auto; flex: 1 1 auto; min-height: 0; overscroll-behavior: contain; }
 .cc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
-.cc-class { padding: 12px; border: 1px solid var(--ogt-line); border-radius: 10px; cursor: pointer; background: linear-gradient(135deg, #1b1608, #0e0b06); transition: border-color .15s, transform .15s; }
+/* class cards are real <button>s: iOS Safari doesn't reliably deliver taps to plain <div>s through delegated handlers */
+.cc-class { display: block; width: 100%; text-align: left; font: inherit; color: inherit; padding: 12px; border: 1px solid var(--ogt-line); border-radius: 10px; cursor: pointer; background: linear-gradient(135deg, #1b1608, #0e0b06); transition: border-color .15s, transform .15s; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.cc-class > span { display: block; }
 .cc-class:hover { border-color: var(--ogt-gold); transform: translateY(-1px); }
 .cc-class.sel { border-color: var(--ogt-green); background: linear-gradient(135deg, #12301d, #0a1a11); }
 .cc-cname { font: 21px 'Pirata One', serif; color: var(--ogt-gold); }
@@ -298,6 +300,7 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 #ogt-cc .ogt-btn { background: #111; color: var(--ogt-text); border: 1px solid #2c2c2c; border-radius: 6px; padding: 8px 14px; cursor: pointer; font-size: 12px; }
 #ogt-cc .ogt-btn.small { padding: 3px 8px; }
 #ogt-cc .ogt-spend { border-color: #1f6b3d; color: var(--ogt-green); background: #0d1f14; }
+#ogt-cc .ogt-btn:disabled { opacity: 1; background: #121214; color: #8d8678; border-color: #2c2c2c; border-style: dashed; cursor: default; }
 #ogt-cc .ogt-form { display: flex; flex-direction: column; gap: 6px; }
 #ogt-cc .ogt-form label { display: flex; flex-direction: column; gap: 2px; font-size: 10px; color: var(--ogt-dim); text-transform: uppercase; letter-spacing: .06em; margin-top: 6px; }
 #ogt-cc input, #ogt-cc textarea { background: #0f0f0f; color: var(--ogt-text); border: 1px solid #2c2c2c; border-radius: 6px; padding: 8px; font-size: 13px; width: 100%; box-sizing: border-box; }
@@ -372,6 +375,14 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 
     /* character creator: full screen, one class per row */
     #ogt-cc { padding: 0; align-items: stretch; }
-    .cc-modal { width: 100%; max-height: 100dvh; border-radius: 0; }
+    .cc-modal { width: 100%; height: 100%; max-height: 100%; border-radius: 0; border: 0; }
+    .cc-modal { height: 100dvh; max-height: 100dvh; }  /* second declaration is ignored by browsers without dvh, leaving the 100% above */
+    .cc-head { padding: calc(env(safe-area-inset-top, 0px) + 12px) 14px 6px; }
+    .cc-head .ogt-btn { min-width: 44px; min-height: 44px; font-size: 16px; }
     .cc-grid { grid-template-columns: 1fr; }
+    /* footer stays pinned and big enough for a thumb, clear of the home bar */
+    .cc-foot { padding: 10px 14px calc(env(safe-area-inset-bottom, 0px) + 12px); gap: 10px; }
+    .cc-foot .ogt-btn { flex: 1; min-height: 48px; font-size: 15px; }
+    #ogt-cc .ogt-chip { min-height: 38px; padding: 6px 14px; font-size: 13px; }
+    #ogt-cc [data-cc-act] { touch-action: manipulation; }
 }

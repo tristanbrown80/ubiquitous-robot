@@ -1186,13 +1186,13 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         let body;
         if (cc.step === 1) {
             body = `<div class="cc-grid">${CLASSES.map((c) => `
-                <div class="cc-class ${c.id === cc.classId ? 'sel' : ''}" data-cc-act="pick" data-id="${c.id}">
-                    <div class="cc-cname">${esc(c.name)}</div><div class="cc-tag">${esc(c.tag)}</div>
-                    <div class="cc-stats"><b>${c.hp}</b> HP · <b>${c.mana}</b> Mana</div>
-                    <div class="cc-skills">${ABILITIES.map((a) => `${AB_NAME[a]} ${CLASS_KIT[c.id].stats[a]}`).join(' · ')}</div>
-                    <div class="cc-skills">${CLASS_KIT[c.id].gear.filter((g) => g.eq).map((g) => esc(g.name)).join(', ')}</div>
-                    <div class="cc-skills">${c.skills.map(([n, r]) => `${esc(n)} ${r}`).join(' · ')}</div>
-                </div>`).join('')}</div>
+                <button type="button" class="cc-class ${c.id === cc.classId ? 'sel' : ''}" data-cc-act="pick" data-id="${c.id}" aria-pressed="${c.id === cc.classId}">
+                    <span class="cc-cname">${esc(c.name)}</span><span class="cc-tag">${esc(c.tag)}</span>
+                    <span class="cc-stats"><b>${c.hp}</b> HP · <b>${c.mana}</b> Mana</span>
+                    <span class="cc-skills">${ABILITIES.map((a) => `${AB_NAME[a]} ${CLASS_KIT[c.id].stats[a]}`).join(' · ')}</span>
+                    <span class="cc-skills">${CLASS_KIT[c.id].gear.filter((g) => g.eq).map((g) => esc(g.name)).join(', ')}</span>
+                    <span class="cc-skills">${c.skills.map(([n, r]) => `${esc(n)} ${r}`).join(' · ')}</span>
+                </button>`).join('')}</div>
                 ${cls ? `<div class="cc-traits"><b>${esc(cls.name)}:</b> ${esc(cls.traits)}</div>` : ''}`;
         } else {
             const owned = new Set(cls.skills.map(([n]) => n));
@@ -1214,7 +1214,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
             <div class="cc-body">${body}</div>
             <div class="cc-foot">
                 ${cc.step === 2 ? `<button class="ogt-btn" data-cc-act="back">Back</button>` : '<span></span>'}
-                ${cc.step === 1 ? `<button class="ogt-btn ogt-spend" data-cc-act="next" ${cls ? '' : 'disabled'}>Next ›</button>`
+                ${cc.step === 1 ? `<button class="ogt-btn ogt-spend" data-cc-act="next" ${cls ? '' : 'disabled'}>${cls ? `Continue as ${esc(cls.name)} ›` : 'Tap a class to choose it'}</button>`
                     : `<button class="ogt-btn ogt-spend" data-cc-act="finish">Begin adventure</button>`}
             </div></div>`;
     }

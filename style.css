@@ -14,7 +14,15 @@ body.ogt-theme #top-bar, body.ogt-theme #top-settings-holder {
 }
 
 /* chat column: borderless prose */
-body.ogt-theme #chat { max-width: 780px; margin: 0 auto; padding: 24px 16px 8px; scrollbar-width: thin; }
+/* NOTE: #chat lives in a flex column. `margin: 0 auto` there turns OFF stretching, so without an explicit width
+   the column shrink-wraps its longest line (up to max-width) and drifts off narrow screens. Always pin width:100%. */
+body.ogt-theme #chat { width: 100%; max-width: 780px; margin-inline: auto; box-sizing: border-box; min-width: 0; padding: 24px 16px 8px; scrollbar-width: thin; overflow-x: hidden; }
+body.ogt-theme #chat .mes, body.ogt-theme #chat .mes_block { min-width: 0; max-width: 100%; box-sizing: border-box; }
+body.ogt-theme #chat .mes .mes_text { overflow-wrap: anywhere; word-break: break-word; min-width: 0; max-width: 100%; }
+/* wide things in messages (code, tables, embeds, immersive HTML) scroll/shrink inside the message instead of widening the page */
+:where(body.ogt-theme #chat .mes .mes_text) :is(pre, code) { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
+:where(body.ogt-theme #chat .mes .mes_text) table { display: block; max-width: 100%; overflow-x: auto; }
+:where(body.ogt-theme #chat .mes .mes_text) :is(video, iframe, canvas, svg) { max-width: 100%; }
 body.ogt-theme #chat .mes {
     background: transparent !important; border: 0 !important; box-shadow: none !important;
     padding: 6px 0 14px !important; margin: 0 !important; border-radius: 0;
@@ -47,7 +55,7 @@ body.ogt-theme #chat .mes[is_user="true"] .mes_text { font-size: 14.5px; }
 /* input bar */
 body.ogt-theme #form_sheld { background: transparent !important; }
 body.ogt-theme #send_form {
-    max-width: 780px; margin: 0 auto 8px; border: 1px solid #26262b !important; border-radius: 12px !important;
+    width: 100%; box-sizing: border-box; max-width: 780px; margin: 0 auto 8px; border: 1px solid #26262b !important; border-radius: 12px !important;
     background: rgba(12, 12, 14, .92) !important; box-shadow: 0 8px 30px rgba(0, 0, 0, .5);
 }
 body.ogt-theme #send_form:focus-within { border-color: #1f6b3d !important; }
@@ -317,3 +325,53 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 }
 .ogt-addrow { display: flex; gap: 6px; margin-top: 4px; }
 .ogt-check { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+
+/* ═════════ Phones & small tablets ═════════ */
+#ogt-toggle, #ogt-menu-btn, .ogt-check-btn, .ogt-reroll-btn, .ogt-accept-btn, .ogt-tab, #ogt-close { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+/* above SillyTavern's top bar (z-index 3005) so they are never covered or untappable */
+#ogt-toggle, #ogt-menu-btn { z-index: 3500; }
+
+@media (max-width: 800px) {
+    /* the side button: a big round button floating above the message bar */
+    #ogt-toggle { top: auto; transform: none; left: 10px; bottom: calc(env(safe-area-inset-bottom, 0px) + 86px); width: 48px; height: 48px; border-radius: 50%; font-size: 20px;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, .6); }
+    body.ogt-right #ogt-toggle { left: auto; right: 10px; }
+    #ogt-menu-btn { top: calc(env(safe-area-inset-top, 0px) + 6px); right: 10px; width: 44px; height: 44px; }
+    /* the full-screen panel's close button lives in the same top-right corner — don't let the ☰ sit on top of it */
+    body.ogt-panel-open #ogt-menu-btn { display: none !important; }
+
+    /* the panel becomes a full-screen sheet instead of a 340px strip over the chat */
+    #ogt-panel, body.ogt-right #ogt-panel { top: 0; bottom: 0; left: 0; right: 0; width: 100%; height: 100dvh; z-index: 3400; border: 0; background: rgba(8, 8, 10, .98);
+        padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); box-sizing: border-box; }
+    #ogt-panel .ogt-head { padding: 8px; }
+    #ogt-panel .ogt-tabs { overflow-x: auto; scrollbar-width: none; min-width: 0; }  /* min-width:0 lets the tab row shrink so the close button stays on screen */
+    #ogt-panel .ogt-tab { flex: 0 0 auto; min-height: 44px; padding: 8px 14px; font-size: 11px; }
+    #ogt-panel #ogt-close { flex: 0 0 48px; min-height: 44px; font-size: 22px; }
+    #ogt-panel .ogt-body { padding: 12px; overscroll-behavior: contain; }
+    #ogt-panel .ogt-btn { min-height: 40px; }
+    #ogt-panel .ogt-btn.small { min-height: 34px; min-width: 34px; }
+    /* iOS zooms into inputs under 16px and leaves the page scrolled sideways */
+    #ogt-panel input, #ogt-panel select, #ogt-panel textarea, #ogt-cc input, #ogt-cc textarea, #ogt-cc select { font-size: 16px; }
+    .ogt-abilities { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+
+    /* chat */
+    body.ogt-theme #chat { padding: 10px 10px 4px; }
+    /* anything wider than the screen (status bars, fixed-width HTML cards) scrolls sideways inside its own message */
+    body.ogt-theme #chat .mes .mes_text { overflow-x: auto; }
+    body.ogt-theme #chat .mes .name_text { font-size: 19px; }
+    body.ogt-theme #chat .mes[is_user="true"] { padding: 10px 12px !important; }
+    body.ogt-theme #send_form { margin-bottom: calc(env(safe-area-inset-bottom, 0px) + 4px); border-radius: 10px !important; }
+
+    /* roll cards: result + full-width tap targets */
+    .ogt-roll { flex-wrap: wrap; gap: 8px; width: auto; align-self: stretch; }
+    .ogt-roll-main { flex: 1 1 55%; min-width: 0; }
+    .ogt-roll-out { width: auto; margin-left: auto; }
+    .ogt-check-btn { flex: 1 0 100%; margin-left: 0; padding: 12px; font-size: 14px; }
+    .ogt-decide { flex: 1 0 100%; }
+    .ogt-reroll-btn, .ogt-accept-btn { flex: 1; padding: 12px; font-size: 13px; }
+
+    /* character creator: full screen, one class per row */
+    #ogt-cc { padding: 0; align-items: stretch; }
+    .cc-modal { width: 100%; max-height: 100dvh; border-radius: 0; }
+    .cc-grid { grid-template-columns: 1fr; }
+}

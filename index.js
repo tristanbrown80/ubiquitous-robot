@@ -70,6 +70,18 @@
     }
     const saveSettings = () => ctx().saveSettingsDebounced();
 
+    // Panel open/closed is remembered PER DEVICE (settings sync across devices, so a desktop-open panel used to cover the phone).
+    const isMobile = () => window.matchMedia('(max-width: 800px)').matches;
+    const panelKey = () => `ogt_panel_${isMobile() ? 'm' : 'd'}`;
+    function panelOpen() {
+        try { const v = localStorage.getItem(panelKey()); if (v !== null) return v === '1'; } catch (e) { /* storage blocked */ }
+        return isMobile() ? false : settings().panelOpen !== false; // phones start with the panel closed
+    }
+    function setPanelOpen(v) {
+        try { localStorage.setItem(panelKey(), v ? '1' : '0'); } catch (e) { /* storage blocked */ }
+        render();
+    }
+
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const num = (v, d = 0) => (Number.isFinite(+v) ? +v : d);
     const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -1371,14 +1383,23 @@ ${notes.map((t) => '- ' + t).join('\n')}` : '';
         const panel = document.getElementById('ogt-panel');
         if (!panel) return;
         const s = settings();
-        panel.classList.toggle('open', s.panelOpen);
-        document.getElementById('ogt-toggle')?.classList.toggle('open', s.panelOpen);
+        const open = panelOpen();
+        panel.classList.toggle('open', open);
+        document.getElementById('ogt-toggle')?.classList.toggle('open', open);
+        document.body.classList.toggle('ogt-panel-open', open);
         if (!ctx().chatMetadata) {
             panel.querySelector('.ogt-body').innerHTML = `<div class="ogt-empty">Open a chat to begin.</div>`;
             return;
         }
         const state = getState();
         panel.querySelectorAll('.ogt-tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === activeTab));
+        // the tab row scrolls sideways on phones — keep the selected tab fully visible
+        const tabsEl = panel.querySelector('.ogt-tabs'), activeEl = panel.querySelector('.ogt-tab.active');
+        if (tabsEl && activeEl && tabsEl.scrollWidth > tabsEl.clientWidth) {
+            const l = activeEl.offsetLeft, r = l + activeEl.offsetWidth;
+            if (l < tabsEl.scrollLeft) tabsEl.scrollLeft = l - 6;
+            else if (r > tabsEl.scrollLeft + tabsEl.clientWidth) tabsEl.scrollLeft = r - tabsEl.clientWidth + 6;
+        }
         const active = document.activeElement;
         if (active && panel.contains(active) && /INPUT|TEXTAREA/.test(active.tagName) && active.type !== 'range' && active.type !== 'checkbox') return; // don't clobber typing
         const body = panel.querySelector('.ogt-body');
@@ -1424,7 +1445,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
     function onClick(e) {
         const target = e.target.closest('[data-ogt-act], .ogt-tab, #ogt-close');
         if (!target) return;
-        if (target.id === 'ogt-close') { settings().panelOpen = false; saveSettings(); return render(); }
+        if (target.id === 'ogt-close') return setPanelOpen(false);
         if (target.classList.contains('ogt-tab')) { activeTab = target.dataset.tab; return render(); }
 
         const state = getState();
@@ -1632,9 +1653,9 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             if (!drawerOpen()) document.body.classList.remove('ogt-menu-open');
         });
         document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !drawerOpen()) document.body.classList.remove('ogt-menu-open'); });
-        document.getElementById('ogt-toggle').addEventListener('click', () => {
-            settings().panelOpen = !settings().panelOpen; saveSettings(); render();
-        });
+        document.getElementById('ogt-toggle').addEventListener('click', () => setPanelOpen(!panelOpen()));
+        // crossing the phone/desktop breakpoint (rotate, resize) switches to that mode's remembered panel state
+        window.matchMedia('(max-width: 800px)').addEventListener?.('change', render);
     }
 
     /** Load web fonts without ever blocking page styling (a failed/slow request just leaves the system fallback). */

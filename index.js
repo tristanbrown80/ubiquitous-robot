@@ -1,6 +1,6 @@
-/* Old Greg's Tavern — SillyTavern extension
+/* Hearthlight — SillyTavern extension
  * Tracks character stats / level, NPC relationships and quests per chat,
- * and shows them in an Old-Greg's-style side panel.
+ * and shows them in a side panel with a modern chat theme.
  *
  * How it works:
  *  1. An extension prompt tells the model the current state and asks it to end every
@@ -12,7 +12,9 @@
 (() => {
     'use strict';
 
-    const MODULE = 'old_gregs_tavern';
+    const APP_NAME = 'Hearthlight';          // display name — change it here and in manifest.json
+    const MODULE = 'hearthlight';            // settings / prompt key
+    const LEGACY_MODULES = ['old_gregs_tavern']; // earlier names whose saved settings are migrated
     // accepts <!--OGT:{}-->, <ogt>{}</ogt>, [[OGT:{}]]
     const TAG_RE = /<!--\s*OGT:?([\s\S]*?)-->|<ogt>([\s\S]*?)<\/ogt>|\[\[OGT:?([\s\S]*?)\]\]/gi;
     let lastStatus = 'No reply seen yet.';
@@ -62,7 +64,12 @@
 
     function settings() {
         const { extensionSettings } = ctx();
-        if (!extensionSettings[MODULE]) extensionSettings[MODULE] = {};
+        if (!extensionSettings[MODULE]) {
+            // first run under this name: carry over settings saved under an earlier name (the old copy is left untouched)
+            const legacy = LEGACY_MODULES.find((k) => extensionSettings[k]);
+            extensionSettings[MODULE] = legacy ? JSON.parse(JSON.stringify(extensionSettings[legacy])) : {};
+            if (legacy) saveSettings();
+        }
         for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
             if (extensionSettings[MODULE][k] === undefined) extensionSettings[MODULE][k] = v;
         }
@@ -565,7 +572,7 @@
         const done = state.quests.filter((q) => q.status !== 'active'); // don't let finished quests pile up forever
         if (done.length > 30) state.quests = state.quests.filter((q) => q.status === 'active' || done.indexOf(q) >= done.length - 30);
         persist(); // single debounced save (SillyTavern also saves the chat itself after each reply)
-        if (s.toasts) notes.forEach(([type, text]) => window.toastr?.[type]?.(text, "Old Greg's Tavern"));
+        if (s.toasts) notes.forEach(([type, text]) => window.toastr?.[type]?.(text, APP_NAME));
     }
 
     // ───────────────────────── prompt injection ─────────────────────────
@@ -1042,7 +1049,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         const chk = c.chat[id]?.extra?.ogt_check;
         if (!chk || id !== c.chat.length - 1) return null;
         if (wantPending ? chk.accepted !== false : !!chk.result) return null;
-        if (isGenerating()) { window.toastr?.info('Wait for the reply to finish first.', "Old Greg's Tavern"); return null; }
+        if (isGenerating()) { window.toastr?.info('Wait for the reply to finish first.', APP_NAME); return null; }
         return chk;
     }
     async function spinDie(btn, label) {
@@ -1105,7 +1112,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
 
     /** Roll a skill on your own initiative (no DC — the narrator judges the total). */
     function quickRoll(skill) {
-        if (isGenerating()) return window.toastr?.info('Wait for the reply to finish first.', "Old Greg's Tavern");
+        if (isGenerating()) return window.toastr?.info('Wait for the reply to finish first.', APP_NAME);
         const nat = d20();
         const bonus = skillBonus(getState(), skill);
         const res = { skill: skill.name, trained: true, bonus, mod: 0, adv: 0, dice: [nat, nat], nat, total: nat + bonus, dc: null, outcome: null };
@@ -1239,7 +1246,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (cc.bonus) addSkill(s, cc.bonus, presetDesc(cc.bonus), { base: 1 });
         closeCreator();
         persist({ manual: true });
-        window.toastr?.success(`${s.name} the ${cls.name} is ready.`, "Old Greg's Tavern");
+        window.toastr?.success(`${s.name} the ${cls.name} is ready.`, APP_NAME);
     }
 
     function onCreatorClick(e) {
@@ -1351,7 +1358,7 @@ ${notes.map((t) => '- ' + t).join('\n')}` : '';
             ${chk('enabled', 'Enable tracking')}
             ${chk('inject', 'Inject tracker rules into prompt')}
             ${chk('toasts', 'Show level-up / quest toasts')}
-            ${chk('theme', 'Modern Old Greg\'s chat theme')}
+            ${chk('theme', `Modern ${APP_NAME} chat theme`)}
             <label class="ogt-field">XP source<select data-ogt-setting="xpMode">
                 <option value="quests" ${s.xpMode === 'quests' ? 'selected' : ''}>Quests only (recommended)</option>
                 <option value="mixed" ${s.xpMode === 'mixed' ? 'selected' : ''}>Quests + small bonus XP</option>
@@ -1416,7 +1423,7 @@ ${notes.map((t) => '- ' + t).join('\n')}` : '';
         if (scanning) return;
         if (!c.generateQuietPrompt) return window.toastr?.error('generateQuietPrompt not available in this SillyTavern version.');
         scanning = true;
-        if (!silent) window.toastr?.info('Scanning recent story…', "Old Greg's Tavern");
+        if (!silent) window.toastr?.info('Scanning recent story…', APP_NAME);
         const quietPrompt = `[OOC] Review the recent story and our tracked state:
 ${JSON.stringify(getState())}
 Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES missing from the tracker, using this schema (omit unchanged keys): {"hp":delta,"mana":delta,"xp":delta,"scene":{"region":"","location":"","time":""},"rel":{"NPC":{"delta":0,"note":""}},"quests":{"add":[{"id":"","title":"","desc":"","difficulty":"trivial|easy|medium|hard|deadly"}],"update":[{"id":"","progress":"","milestone":false}],"complete":[],"fail":[]}}. Leave out xp — quest rewards are paid automatically. If nothing is missing reply {}.`;
@@ -1430,12 +1437,12 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             if (last) { last.extra = last.extra || {}; last.extra.ogt_snap = clone(getState()); }
             persist({ manual: true });
             lastStatus = 'Auto-scan applied to last reply.';
-            if (settings().toasts) notes.forEach(([t, m]) => window.toastr?.[t]?.(m, "Old Greg's Tavern"));
-            if (!silent) window.toastr?.success('Tracker updated.', "Old Greg's Tavern");
+            if (settings().toasts) notes.forEach(([t, m]) => window.toastr?.[t]?.(m, APP_NAME));
+            if (!silent) window.toastr?.success('Tracker updated.', APP_NAME);
         } catch (e) {
             console.error(`[${MODULE}] scan failed`, e);
             lastStatus = 'Scan failed (see console).';
-            if (!silent) window.toastr?.error('Could not parse the scan result.', "Old Greg's Tavern");
+            if (!silent) window.toastr?.error('Could not parse the scan result.', APP_NAME);
         } finally {
             scanning = false;
             render();
@@ -1481,7 +1488,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
                 const notes = [];
                 completeQuest(state, q, notes);
                 persist({ manual: true });
-                if (settings().toasts) notes.forEach(([t, m]) => window.toastr?.[t]?.(m, "Old Greg's Tavern"));
+                if (settings().toasts) notes.forEach(([t, m]) => window.toastr?.[t]?.(m, APP_NAME));
                 return;
             }
             case 'q-fail': if (q) q.status = 'failed'; return persist({ manual: true });
@@ -1510,7 +1517,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
                 removeItem(state, name, 1);
                 const text = `${state.name} used ${name}${parts.length ? ': ' + parts.join(', ') : ''} (HP ${state.hp}/${state.hpMax}, Mana ${state.mana}/${state.manaMax}).`;
                 pushNote(text);
-                window.toastr?.success(text, "Old Greg's Tavern");
+                window.toastr?.success(text, APP_NAME);
                 return persist({ manual: true });
             }
             case 'item-drop': if (item) { removeItem(state, item.name, 1); pushNote(`${state.name} discarded ${item.name}.`); } return persist({ manual: true });
@@ -1617,7 +1624,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
     function buildUI() {
         if (document.getElementById('ogt-panel')) return;
         document.body.insertAdjacentHTML('beforeend', `
-            <button id="ogt-toggle" title="Old Greg's Tavern" aria-label="Open the character panel">🍺</button>
+            <button id="ogt-toggle" title="${APP_NAME}" aria-label="Open the character panel">🔥</button>
             <button id="ogt-menu-btn" title="Menu"><i class="fa-solid fa-bars"></i></button>
             <aside id="ogt-panel">
                 <div class="ogt-head">
@@ -1667,7 +1674,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
         item.id = 'ogt-menu-entry';
         item.className = 'list-group-item flex-container flexGap5 interactable';
         item.tabIndex = 0;
-        item.innerHTML = `<div class="fa-solid fa-dice-d20 extensionsMenuExtensionButton"></div><span>Old Greg's Tavern</span>`;
+        item.innerHTML = `<div class="fa-solid fa-dice-d20 extensionsMenuExtensionButton"></div><span>${APP_NAME}</span>`;
         item.addEventListener('click', () => setPanelOpen(!panelOpen()));
         menu.appendChild(item);
     }

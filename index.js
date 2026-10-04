@@ -1617,7 +1617,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
     function buildUI() {
         if (document.getElementById('ogt-panel')) return;
         document.body.insertAdjacentHTML('beforeend', `
-            <button id="ogt-toggle" title="Old Greg's Tavern"><i class="fa-solid fa-beer-mug-empty"></i></button>
+            <button id="ogt-toggle" title="Old Greg's Tavern" aria-label="Open the character panel">🍺</button>
             <button id="ogt-menu-btn" title="Menu"><i class="fa-solid fa-bars"></i></button>
             <aside id="ogt-panel">
                 <div class="ogt-head">
@@ -1658,6 +1658,20 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
         window.matchMedia('(max-width: 800px)').addEventListener?.('change', render);
     }
 
+    /** A second, always-reachable way to open the panel: an entry in SillyTavern's own ✨ extensions menu (next to the message box). */
+    function addMenuEntry(tries = 0) {
+        const menu = document.getElementById('extensionsMenu');
+        if (!menu) { if (tries < 20) setTimeout(() => addMenuEntry(tries + 1), 500); return; }
+        if (document.getElementById('ogt-menu-entry')) return;
+        const item = document.createElement('div');
+        item.id = 'ogt-menu-entry';
+        item.className = 'list-group-item flex-container flexGap5 interactable';
+        item.tabIndex = 0;
+        item.innerHTML = `<div class="fa-solid fa-dice-d20 extensionsMenuExtensionButton"></div><span>Old Greg's Tavern</span>`;
+        item.addEventListener('click', () => setPanelOpen(!panelOpen()));
+        menu.appendChild(item);
+    }
+
     /** Load web fonts without ever blocking page styling (a failed/slow request just leaves the system fallback). */
     function loadFonts() {
         if (document.getElementById('ogt-fonts')) return;
@@ -1673,6 +1687,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
         settings();
         loadFonts();
         buildUI();
+        addMenuEntry();
         applyTheme();
         const { eventSource, eventTypes } = ctx();
         eventSource.on(eventTypes.MESSAGE_RECEIVED, onMessageReceived);

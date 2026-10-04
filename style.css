@@ -131,8 +131,8 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 
 #ogt-toggle {
     position: fixed; left: 8px; top: 50%; transform: translateY(-50%); z-index: 3001;
-    width: 36px; height: 36px; border-radius: 8px; cursor: pointer;
-    background: #1a1208; color: #e9b872; border: 1px solid #5a3f1a;
+    width: 36px; height: 36px; border-radius: 8px; cursor: pointer; font-size: 18px; line-height: 1; padding: 0;
+    background: #1a1208; color: #e9b872; border: 1px solid #e9b872; box-shadow: 0 0 12px rgba(233, 184, 114, .35);
 }
 #ogt-toggle.open { display: none; }
 
@@ -333,8 +333,8 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 
 @media (max-width: 800px) {
     /* the side button: a big round button floating above the message bar */
-    #ogt-toggle { top: auto; transform: none; left: 10px; bottom: calc(env(safe-area-inset-bottom, 0px) + 86px); width: 48px; height: 48px; border-radius: 50%; font-size: 20px;
-        box-shadow: 0 6px 20px rgba(0, 0, 0, .6); }
+    #ogt-toggle { top: auto; transform: none; left: 10px; bottom: calc(env(safe-area-inset-bottom, 0px) + 86px); width: 52px; height: 52px; border-radius: 50%; font-size: 26px;
+        border-width: 2px; box-shadow: 0 6px 20px rgba(0, 0, 0, .7), 0 0 16px rgba(233, 184, 114, .45); }
     body.ogt-right #ogt-toggle { left: auto; right: 10px; }
     #ogt-menu-btn { top: calc(env(safe-area-inset-top, 0px) + 6px); right: 10px; width: 44px; height: 44px; }
     /* the full-screen panel's close button lives in the same top-right corner — don't let the ☰ sit on top of it */

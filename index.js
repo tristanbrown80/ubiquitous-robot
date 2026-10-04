@@ -41,6 +41,7 @@
         showRollMsg: false, // false = the result is passed to the narrator silently; true = posted as a visible [ROLL] message
         collapseMenu: true,
         luckRerolls: true,
+        defaultGenre: 'fantasy', // pre-selected in the character creator
     };
 
     // base XP by quest difficulty — the model only picks the difficulty, the extension pays out
@@ -111,6 +112,7 @@
             stats: { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 }, statPoints: 0,
             inv: [], gold: 0, enemies: [],
             luck: 1, luckMax: 3,
+            genre: 'fantasy',
         };
     }
 
@@ -129,6 +131,7 @@
         if (!Array.isArray(o.enemies)) o.enemies = [];
         if (!Number.isFinite(o.luckMax)) o.luckMax = 3;
         if (!Number.isFinite(o.luck)) o.luck = 1;
+        if (!o.genre) o.genre = 'fantasy'; // chats from before genres were fantasy
         return o;
     }
 
@@ -143,6 +146,8 @@
         swordsmanship: 'str', archery: 'dex', stealth: 'dex', persuasion: 'cha', intimidation: 'cha', lore: 'int',
         survival: 'wis', alchemy: 'int', magic: 'int', smithing: 'str', medicine: 'wis', lockpicking: 'dex',
         deception: 'cha', performance: 'cha', insight: 'wis',
+        // modern-day skills
+        firearms: 'dex', brawling: 'str', athletics: 'str', driving: 'dex', hacking: 'int', investigation: 'int', mechanics: 'int', streetwise: 'cha',
     };
     const AB_FULL = { str: 'Strength', dex: 'Dexterity', con: 'Constitution', int: 'Intelligence', wis: 'Wisdom', cha: 'Charisma' };
     /** How an NPC feels about the player nudges social rolls: -4 (hostile) … +4 (devoted). Only applied when the check names the NPC. */
@@ -401,7 +406,7 @@
             if (d.inv.gold) {
                 const g = clamp(Math.round(num(d.inv.gold)), -9999, 9999);
                 s.gold = Math.max(0, s.gold + g);
-                notes.push(['info', `${g >= 0 ? '+' : ''}${g} gold`]);
+                notes.push(['info', `${g >= 0 ? '+' : ''}${g} ${genreOf(s).terms.cash}`]);
             }
         }
 
@@ -606,15 +611,15 @@
 Current tracked state:
 ${JSON.stringify(compact)}
 
-Honour this state in the narrative (injured characters act injured, NPC attitudes match their relationship tier, active quests stay relevant). Skills are the player's real competence: rank 1 = novice, 5 = master. Let outcomes reflect them — a rank-1 skill fumbles under pressure, a rank-5 skill is reliable — and never let the player perform feats far above their rank or level without consequence. Skill ranks are raised by the player with skill points, not by you. The player's armor_class is derived from their gear and DEX; enemies must hit it. Items: use "inv.add" only for loot, rewards or purchases the player actually obtains (types: weapon with "dmg" dice and "ability" str/dex; armor with base "ac" 11 leather / 13-14 medium / 16+ heavy; shield "ac":2; potion/consumable with "heal"/"mana" dice; misc). Keep gear modest for the player's level. "gold" is a delta. Use "inv.remove" when an item is lost, stolen, given away or used up in the story; the game removes potions the player drinks itself.
+${G().prompt.setting}Honour this state in the narrative (injured characters act injured, NPC attitudes match their relationship tier, active quests stay relevant). Skills are the player's real competence: rank 1 = novice, 5 = master. Let outcomes reflect them — a rank-1 skill fumbles under pressure, a rank-5 skill is reliable — and never let the player perform feats far above their rank or level without consequence. Skill ranks are raised by the player with skill points, not by you. The player's armor_class is derived from their gear and DEX; enemies must hit it. Items: use "inv.add" only for loot, rewards or purchases the player actually obtains ${G().prompt.itemRules} Use "inv.remove" when an item is lost, stolen, given away or used up in the story; the game removes potions the player drinks itself.
 
 At the very END of EVERY reply, after all narrative, append exactly ONE hidden HTML comment with only the values that CHANGED this turn:
 <!--OGT:{...json...}-->
 Schema (omit anything unchanged; use {} content only if nothing changed — or omit the comment):
-{"hp":-3,"mana":-1,${settings().xpMode === 'quests' ? '' : '"xp":5,'}"class":"Death Knight",
- "scene":{"region":"King's Highway","location":"North of Crosshaven Gate","time":"Morning"},
-${settings().trackRel ? ' "rel":{"Vex Nightshade":{"delta":5,"note":"short reason / how they feel"}},\n' : ''}${settings().modelUnlockSkills ? ' "skills":{"unlock":[{"name":"Lockpicking","desc":"one line"}]},\n' : ''} "inv":{"add":[{"name":"Shortsword","type":"weapon","dmg":"1d6","ability":"dex","qty":1},{"name":"Healing Potion","type":"potion","heal":"2d4+2","qty":1},{"name":"Chain Shirt","type":"armor","ac":13}],"remove":[{"name":"Rope","qty":1}],"gold":15},
- "enemies":{"add":[{"name":"Goblin","hp":9,"ac":13}],"clear":true},
+{"hp":-3,"mana":-1,${settings().xpMode === 'quests' ? '' : '"xp":5,'}"class":"${G().prompt.classExample}",
+ "scene":{${G().prompt.sceneExample}},
+${settings().trackRel ? ` "rel":{"${G().prompt.npcExample}":{"delta":5,"note":"short reason / how they feel"}},\n` : ''}${settings().modelUnlockSkills ? ' "skills":{"unlock":[{"name":"Lockpicking","desc":"one line"}]},\n' : ''} "inv":${G().prompt.invExample},
+ "enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":13}],"clear":true},
  "quests":{"add":[{"id":"short_id","title":"Quest title","desc":"one line objective","difficulty":"trivial|easy|medium|hard|deadly"}],
            "update":[{"id":"short_id","progress":"what's done / what's next","milestone":true}],
            "complete":["short_id"],"fail":["short_id"]}}
@@ -659,13 +664,13 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
         </div>
         <div class="ogt-stats">
             ${bar('HP', 'hp', s.hp, s.hpMax)}
-            ${bar('MANA', 'mana', s.mana, s.manaMax)}
+            ${bar(G().terms.mana.toUpperCase(), 'mana', s.mana, s.manaMax)}
             ${bar(`LVL ${s.level}`, 'xp', s.xp, xpNeeded(s.level))}
         </div>
         <div class="ogt-abilities">${ABILITIES.map((a) => `<div class="ogt-ab" title="${AB_NAME[a]} ${s.stats[a]}">
             <div class="n">${AB_NAME[a]}</div><div class="v">${s.stats[a]}</div><div class="m">${fmtMod(amod(s.stats[a]))}</div>
             ${s.statPoints > 0 && s.stats[a] < 20 ? `<button data-ogt-act="stat-up" data-ab="${a}" title="Spend an ability point">+</button>` : ''}</div>`).join('')}</div>
-        <div class="ogt-acrow">AC <b>${computeAC(s)}</b> · Proficiency <b>${fmtMod(profBonus(s.level))}</b> · <b>${s.gold}</b> gold${settings().luckRerolls ? ` · <span class="luck" title="Spend Luck to reroll a failed check">🍀 <b>${s.luck}/${s.luckMax}</b></span>` : ''}${s.statPoints > 0 ? ` · <span class="pts">${s.statPoints} ability point${s.statPoints === 1 ? '' : 's'}</span>` : ''}</div>`;
+        <div class="ogt-acrow">AC <b>${computeAC(s)}</b> · Proficiency <b>${fmtMod(profBonus(s.level))}</b> · <b>${s.gold}</b> ${G().terms.cash}${settings().luckRerolls ? ` · <span class="luck" title="Spend Luck to reroll a failed check">🍀 <b>${s.luck}/${s.luckMax}</b></span>` : ''}${s.statPoints > 0 ? ` · <span class="pts">${s.statPoints} ability point${s.statPoints === 1 ? '' : 's'}</span>` : ''}</div>`;
 
         const foes = s.enemies.filter((e) => !e.defeated);
         if (s.enemies.length) {
@@ -696,7 +701,7 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
             h += `<div class="ogt-form">
                 ${field('name', 'Name', 'text')}${field('class', 'Class', 'text')}${field('avatar', 'Portrait URL', 'text')}
                 ${field('level', 'Level')}${field('xp', 'XP')}
-                ${field('hp', 'HP')}${field('hpMax', 'Max HP')}${field('mana', 'Mana')}${field('manaMax', 'Max mana')}${field('luck', 'Luck')}${field('luckMax', 'Max luck')}
+                ${field('hp', 'HP')}${field('hpMax', 'Max HP')}${field('mana', G().terms.mana)}${field('manaMax', 'Max ' + G().terms.mana.toLowerCase())}${field('luck', 'Luck')}${field('luckMax', 'Max luck')}
                 ${ABILITIES.map((a) => `<label>${AB_NAME[a]}<input data-ogt-stat="${a}" type="number" min="1" max="30" value="${s.stats[a]}"></label>`).join('')}
             </div>`;
         }
@@ -803,7 +808,7 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
         const foe = findEnemy(s, chk.target);
         if (hit && foe) { foe.hp = Math.max(0, foe.hp - dmg); if (foe.hp === 0) foe.defeated = true; }
         const label = crit ? 'Critical Hit' : hit ? 'Hit' : nat === 1 ? 'Critical Miss' : 'Miss';
-        const how = spell ? 'spell' : (w ? w.name : 'unarmed');
+        const how = spell ? genreOf(s).terms.special : (w ? w.name : 'unarmed');
         const foeTxt = foe ? ` ${foe.name}: ${foe.hp}/${foe.hpMax} HP${foe.defeated ? ' — DEFEATED' : ''}.` : '';
         const adTxt = adv ? ` (${adv > 0 ? 'advantage' : 'disadvantage'})` : '';
         return {
@@ -846,7 +851,7 @@ Rules: hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS
         return `
 
 [Checks — the player rolls their own dice]
-When the player's action has real uncertainty AND a meaningful consequence for failing (an attack, sneaking past someone, persuading a resistant NPC, climbing, picking a lock, casting under pressure…), do NOT decide the outcome yourself. Narrate up to the moment of the attempt, STOP there, and request one check by putting it inside the SAME hidden tag you always append at the very end of the reply, e.g.
+When the player's action has real uncertainty AND a meaningful consequence for failing (an attack, sneaking past someone, persuading a resistant NPC, climbing, picking a lock, ${G().prompt.pressure}…), do NOT decide the outcome yourself. Narrate up to the moment of the attempt, STOP there, and request one check by putting it inside the SAME hidden tag you always append at the very end of the reply, e.g.
 <!--OGT:{"check":{"skill":"Stealth","dc":15,"mod":0,"adv":0,"why":"slip past the guards"}}-->
 The check must live ONLY inside that hidden <!--OGT:…--> comment. Never write it (or any JSON, "check:" or "dc") as visible text in the story.
 - Pick the best-fitting skill from the player's sheet (the bonus already includes its governing ability). Player skills: ${sheet}. If none fits, omit "skill" and give "ability":"str|dex|con|int|wis|cha" for a raw ability check (bonus = that ability's modifier); with neither it is +0.
@@ -857,9 +862,9 @@ The check must live ONLY inside that hidden <!--OGT:…--> comment. Never write 
 ${SOCIAL_RULES}
 
 [Combat — the game resolves every attack and tracks enemy HP]
-- Register each enemy the moment it appears, with sensible stats: <!--OGT:{"enemies":{"add":[{"name":"Goblin","hp":9,"ac":13}]}}-->. Typical AC: 10 unarmored, 12 light armor, 14 armored, 16+ heavy. Use "enemies":{"clear":true} when the fight ends.
-- When the PLAYER attacks (a weapon strike or a damaging spell), stop and request: "check":{"kind":"attack","target":"Goblin","ac":13,"why":"stab the goblin"} (for a spell add "spell":true,"dmg":"1d8" and report the mana cost as a negative "mana"). The game rolls the hit and damage with their real weapon and applies it to that enemy.
-- When an ENEMY attacks the player, stop and request: "check":{"kind":"defend","enemy":"Goblin","atk":4,"dmg":"1d6+1","why":"slashes at you"} (atk +2..+8, dmg by threat). The game rolls against the player's AC and applies the damage to their HP itself — NEVER also report "hp" for combat damage.
+- Register each enemy the moment it appears, with sensible stats: <!--OGT:{"enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":13}]}}-->. Typical AC: ${G().prompt.acGuide}. Use "enemies":{"clear":true} when the fight ends.
+- When the PLAYER attacks (${G().prompt.attackWho}), stop and request: "check":{"kind":"attack","target":"${G().prompt.enemyExample}","ac":13,"why":"the attack, in a few words"} (${G().prompt.attackSpell}). The game rolls the hit and damage with their real weapon and applies it to that enemy.
+- When an ENEMY attacks the player, stop and request: "check":{"kind":"defend","enemy":"${G().prompt.enemyExample}","atk":4,"dmg":"1d6+1","why":"how it strikes"} (atk +2..+8, dmg by threat). The game rolls against the player's AC and applies the damage to their HP itself — NEVER also report "hp" for combat damage.
 - The result tells you hit/miss, damage dealt and the enemy's remaining HP. Narrate it exactly; a DEFEATED enemy is dead or out of the fight. Skill checks stay "kind":"skill" (or omit kind). One check per turn, so run a fight one attack at a time.
 - Never invent the player's gear: they carry only what the sheet's "gear" lists. Give loot/purchases with "inv.add" (and "inv.remove" when something is used up), never in prose alone.`;
     }
@@ -873,7 +878,7 @@ ${SOCIAL_RULES}
 
 [Dice — rolled by the game for this turn. Do not reroll, invent or alter them.]
 d20 #1 = ${pendingRoll.a}, d20 #2 = ${pendingRoll.b}
-When the player's action has real uncertainty AND a meaningful consequence for failing (an attack, sneaking past someone, persuading a resistant NPC, climbing, picking a lock, casting under pressure…), resolve it as ONE skill check. Safe, trivial or purely conversational actions need no roll.
+When the player's action has real uncertainty AND a meaningful consequence for failing (an attack, sneaking past someone, persuading a resistant NPC, climbing, picking a lock, ${G().prompt.pressure}…), resolve it as ONE skill check. Safe, trivial or purely conversational actions need no roll.
 1. Choose the best-fitting skill from the player's sheet (bonus = its rank; no fitting skill = +0). Player skills: ${sheet}.
 2. Choose a DC: 8 easy, 12 routine, 15 moderate, 18 hard, 22 heroic. For strong situational factors add "mod" (-5..+5), and "adv":1 for advantage / -1 for disadvantage.
 3. nat = die #1 (advantage: the higher die; disadvantage: the lower). total = nat + skill bonus + mod. Natural 20 always succeeds, natural 1 always fails; otherwise total >= DC succeeds. Beating the DC by 5+ is a strong success; missing by 5+ is a bad failure.
@@ -953,7 +958,7 @@ ${SOCIAL_RULES}`;
         const extra = [k.mod ? `${sign(k.mod)} situation` : '', k.adv ? (k.adv > 0 ? 'advantage' : 'disadvantage') : ''].filter(Boolean).join(' · ');
         let title, math, btn;
         if (k.kind === 'attack') {
-            title = `Attack · ${k.target}`; math = `${sign(k.bonus + k.mod)} to hit · AC ${k.ac}${k.spell ? ' · spell' : ''}`; btn = 'Roll attack';
+            title = `Attack · ${k.target}`; math = `${sign(k.bonus + k.mod)} to hit · AC ${k.ac}${k.spell ? ' · ' + G().terms.special : ''}`; btn = 'Roll attack';
         } else if (k.kind === 'defend') {
             title = `${k.enemy} attacks you`; math = `${sign(k.atk + k.mod)} to hit · your AC ${computeAC(getState())}`; btn = 'Defend';
         } else {
@@ -1171,12 +1176,104 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
             { name: 'Greatsword', type: 'weapon', dmg: '2d6', ability: 'str', eq: 1 }, { name: 'Plate Armor', type: 'armor', ac: 16, eq: 1 }, { ...POTION, qty: 1 }] },
     };
 
+    // ───────────────────────── genres ─────────────────────────
+    // A genre bundles classes + starting kits + skill list + wording. Adding another (sci-fi, western, …) is just more data here.
+    const MODERN_SKILLS = [
+        ['Firearms', 'Pistols, rifles and keeping your aim under pressure.'], ['Brawling', 'Fists, improvised weapons and street fighting.'],
+        ['Athletics', 'Running, climbing, swimming and endurance.'], ['Stealth', 'Moving unseen, tailing people, picking pockets.'],
+        ['Driving', 'Cars, bikes and getaways.'], ['Hacking', 'Computers, networks and electronics.'],
+        ['Investigation', 'Clues, records and putting the picture together.'], ['Medicine', 'First aid, trauma care and diagnosis.'],
+        ['Mechanics', 'Fixing and sabotaging machines and vehicles.'], ['Streetwise', 'The underworld, the city and who to ask.'],
+        ['Persuasion', 'Convincing, negotiating, charm.'], ['Deception', 'Lying, bluffing, disguises and forgery.'],
+        ['Intimidation', 'Threats, presence, breaking morale.'], ['Insight', 'Reading intent, spotting lies and moods.'],
+        ['Survival', 'Wilderness, field medicine, navigation.'],
+    ];
+    const MODERN_CLASSES = [
+        { id: 'soldier', name: 'Soldier', tag: 'Trained for the worst day.', hp: 34, mana: 2, grow: [7, 1], skills: [['Firearms', 3], ['Brawling', 2], ['Survival', 1]],
+            traits: 'Military-trained. Reliable under fire, fit and disciplined; comfortable with weapons and tactics, less at home with polite society or technology.' },
+        { id: 'detective', name: 'Detective', tag: 'Sees what others miss.', hp: 24, mana: 6, grow: [5, 2], skills: [['Investigation', 3], ['Insight', 2], ['Firearms', 1]],
+            traits: 'Methodical investigator. Notices clues, reads people and builds a case; has contacts in law enforcement. Average in a straight fight.' },
+        { id: 'hacker', name: 'Hacker', tag: 'The network is the weapon.', hp: 18, mana: 14, grow: [3, 4], skills: [['Hacking', 3], ['Mechanics', 2], ['Stealth', 1]],
+            traits: 'Elite with computers, networks and electronics. Digital intrusions and gadgets spend Focus (report as negative mana). Physically frail and happiest behind a screen.' },
+        { id: 'medic', name: 'Medic', tag: 'Keeps people alive.', hp: 26, mana: 8, grow: [5, 3], skills: [['Medicine', 3], ['Insight', 1], ['Persuasion', 1], ['Athletics', 1]],
+            traits: 'Trauma-trained. Stabilises wounds, treats illness and stays calm in a crisis; strangers trust them in an emergency. Prefers not to fight.' },
+        { id: 'fixer', name: 'Fixer', tag: 'Knows a guy.', hp: 22, mana: 8, grow: [4, 3], skills: [['Persuasion', 3], ['Deception', 2], ['Streetwise', 1]],
+            traits: 'Social operator with a long contact list. Talks, bargains and bluffs through problems and always knows who to call; weak in a brawl. Has a little extra cash.' },
+        { id: 'driver', name: 'Driver', tag: 'Fast hands, faster car.', hp: 28, mana: 5, grow: [6, 2], skills: [['Driving', 3], ['Mechanics', 2], ['Firearms', 1]],
+            traits: 'Wheelman and mechanic. Unmatched behind the wheel, quick to fix or hot-wire a vehicle, cool under pressure; cautious about close combat.' },
+        { id: 'brawler', name: 'Brawler', tag: 'Hits first, asks later.', hp: 34, mana: 2, grow: [7, 1], skills: [['Brawling', 3], ['Intimidation', 2], ['Streetwise', 1]],
+            traits: 'Street fighter or bouncer. Tough, intimidating and happiest in a scrap; weak with technology and paperwork.' },
+    ];
+    const FIRSTAID = { name: 'First Aid Kit', type: 'consumable', heal: '2d4+2', desc: 'Bandages, antiseptic and a steady hand.' };
+    const MODERN_KIT = {
+        soldier: { stats: { str: 14, dex: 13, con: 15, int: 8, wis: 12, cha: 10 }, gold: 200, gear: [
+            { name: 'Service Pistol', type: 'weapon', dmg: '1d10', ability: 'dex', eq: 1 }, { name: 'Combat Knife', type: 'weapon', dmg: '1d4', ability: 'dex' },
+            { name: 'Body Armor', type: 'armor', ac: 14, eq: 1 }, { ...FIRSTAID, qty: 2 }] },
+        detective: { stats: { str: 8, dex: 13, con: 10, int: 15, wis: 14, cha: 12 }, gold: 150, gear: [
+            { name: 'Revolver', type: 'weapon', dmg: '1d8', ability: 'dex', eq: 1 }, { name: 'Overcoat', type: 'armor', ac: 11, eq: 1 },
+            { ...FIRSTAID, qty: 1 }, { name: 'Notebook', type: 'misc', desc: 'Half-filled with case notes.' }, { name: 'Flashlight', type: 'misc' }] },
+        hacker: { stats: { str: 8, dex: 14, con: 13, int: 15, wis: 12, cha: 10 }, gold: 100, gear: [
+            { name: 'Taser', type: 'weapon', dmg: '1d4', ability: 'dex', eq: 1 }, { name: 'Reinforced Hoodie', type: 'armor', ac: 11, eq: 1 },
+            { name: 'Laptop', type: 'misc', desc: 'Stickered, scuffed, loaded with tools.' }, { name: 'Energy Drink', type: 'consumable', mana: '1d6+2', qty: 2 }, { ...FIRSTAID, qty: 1 }] },
+        medic: { stats: { str: 8, dex: 10, con: 14, int: 13, wis: 15, cha: 12 }, gold: 120, gear: [
+            { name: 'Stun Baton', type: 'weapon', dmg: '1d6', ability: 'str', eq: 1 }, { name: 'Light Vest', type: 'armor', ac: 12, eq: 1 },
+            { ...FIRSTAID, qty: 3 }, { name: 'Energy Drink', type: 'consumable', mana: '1d6+2', qty: 1 }] },
+        fixer: { stats: { str: 8, dex: 14, con: 10, int: 12, wis: 13, cha: 15 }, gold: 500, gear: [
+            { name: 'Compact Pistol', type: 'weapon', dmg: '1d8', ability: 'dex', eq: 1 }, { name: 'Tailored Jacket', type: 'armor', ac: 11, eq: 1 },
+            { ...FIRSTAID, qty: 1 }, { name: 'Burner Phone', type: 'misc', desc: 'Untraceable, mostly.' }] },
+        driver: { stats: { str: 13, dex: 15, con: 14, int: 12, wis: 10, cha: 8 }, gold: 180, gear: [
+            { name: 'Tire Iron', type: 'weapon', dmg: '1d6', ability: 'str', eq: 1 }, { name: 'Pistol', type: 'weapon', dmg: '1d8', ability: 'dex' },
+            { name: 'Leather Jacket', type: 'armor', ac: 12, eq: 1 }, { ...FIRSTAID, qty: 1 }, { name: 'Toolkit', type: 'misc' }] },
+        brawler: { stats: { str: 15, dex: 13, con: 14, int: 8, wis: 12, cha: 10 }, gold: 80, gear: [
+            { name: 'Baseball Bat', type: 'weapon', dmg: '1d6', ability: 'str', eq: 1 }, { name: 'Brass Knuckles', type: 'weapon', dmg: '1d4', ability: 'str' },
+            { name: 'Leather Jacket', type: 'armor', ac: 12, eq: 1 }, { ...FIRSTAID, qty: 2 }] },
+    };
+
+    const GENRES = {
+        fantasy: {
+            id: 'fantasy', name: 'Fantasy', blurb: 'Swords, spells and ancient ruins.',
+            terms: { mana: 'Mana', cash: 'gold', special: 'spell' },
+            skills: PRESET_SKILLS, classes: CLASSES, kits: CLASS_KIT,
+            prompt: {
+                setting: '',
+                sceneExample: `"region":"King's Highway","location":"North of Crosshaven Gate","time":"Morning"`,
+                classExample: 'Death Knight', npcExample: 'Vex Nightshade', enemyExample: 'Goblin',
+                invExample: `{"add":[{"name":"Shortsword","type":"weapon","dmg":"1d6","ability":"dex","qty":1},{"name":"Healing Potion","type":"potion","heal":"2d4+2","qty":1},{"name":"Chain Shirt","type":"armor","ac":13}],"remove":[{"name":"Rope","qty":1}],"gold":15}`,
+                itemRules: `(types: weapon with "dmg" dice and "ability" str/dex; armor with base "ac" 11 leather / 13-14 medium / 16+ heavy; shield "ac":2; potion/consumable with "heal"/"mana" dice; misc). Keep gear modest for the player's level. "gold" is a delta.`,
+                acGuide: '10 unarmored, 12 light armor, 14 armored, 16+ heavy',
+                pressure: 'casting under pressure',
+                attackWho: 'a weapon strike or a damaging spell',
+                attackSpell: 'for a spell add "spell":true,"dmg":"1d8" and report the mana cost as a negative "mana"',
+            },
+        },
+        modern: {
+            id: 'modern', name: 'Modern', blurb: 'The contemporary real world. Guns, cars, phones — no magic.',
+            terms: { mana: 'Focus', cash: 'cash', special: 'special ability' },
+            skills: MODERN_SKILLS, classes: MODERN_CLASSES, kits: MODERN_KIT,
+            prompt: {
+                setting: `[Setting] This is the contemporary real world: cities, cars, phones, guns, police, corporations, the internet. There is NO magic, no fantasy creatures and no medieval gear. Money is cash; the tag's "gold" and "mana" fields mean the player's cash and Focus (the nerve, stamina or adrenaline they spend on special abilities like hacking, tactics or a daring stunt). Keep the tone and realism consistent with whatever the story sets up (grounded crime drama, thriller, slice of life…); violence has real consequences.\n\n`,
+                sceneExample: `"region":"Eastside","location":"Parking garage, level 3","time":"11:40 PM"`,
+                classExample: 'Detective', npcExample: 'Marcus Webb', enemyExample: 'Thug',
+                invExample: `{"add":[{"name":"Compact Pistol","type":"weapon","dmg":"1d8","ability":"dex","qty":1},{"name":"First Aid Kit","type":"consumable","heal":"2d4+2","qty":1},{"name":"Light Vest","type":"armor","ac":12}],"remove":[{"name":"Burner Phone","qty":1}],"gold":200}`,
+                itemRules: `(types: weapon with "dmg" dice and "ability" — dex for firearms and light weapons, str for heavy melee; armor with base "ac" 11 clothing / 12 jacket or light vest / 14 body armor / 16+ tactical gear; shield "ac":2 for something like a riot shield; consumable with "heal" (first aid, medication) or "mana" (Focus: caffeine, a pep talk) dice; misc for phones, tools, keys). Keep gear plausible and modest for the player's means. "gold" is a cash delta.`,
+                acGuide: '10 unarmored civilian, 12 jacket or street fighter, 14 trained and vested, 16+ armored or behind solid cover',
+                pressure: 'hacking, driving or improvising under pressure',
+                attackWho: 'shooting, a melee strike or a damaging special ability such as an exploit or explosive',
+                attackSpell: 'for a special ability add "spell":true,"dmg":"1d8" and report the Focus cost as a negative "mana"',
+            },
+        },
+    };
+    const genreOf = (s) => GENRES[s?.genre] || GENRES.fantasy;
+    const G = () => genreOf(getState());
+    const presetDescAny = (n) => Object.values(GENRES).flatMap((g) => g.skills).find(([p]) => p === n)?.[1] || '';
+
     let cc = null; // creator wizard state
 
     function openCreator() {
         const s = getState();
-        const cur = CLASSES.find((c) => c.name === s.class);
-        cc = { step: 1, classId: cur?.id || '', name: s.name, avatar: s.avatar || '', backstory: s.backstory || '', bonus: '' };
+        const genre = GENRES[s.created ? s.genre : settings().defaultGenre] ? (s.created ? s.genre : settings().defaultGenre) : 'fantasy';
+        const cur = GENRES[genre].classes.find((c) => c.name === s.class);
+        cc = { step: 1, genre, classId: cur?.id || '', name: s.name, avatar: s.avatar || '', backstory: s.backstory || '', bonus: '' };
         if (!document.getElementById('ogt-cc')) document.body.insertAdjacentHTML('beforeend', '<div id="ogt-cc"></div>');
         const el = document.getElementById('ogt-cc');
         el.classList.add('open');
@@ -1189,15 +1286,18 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
     function renderCreator() {
         const el = document.getElementById('ogt-cc');
         if (!el || !cc) return;
-        const cls = CLASSES.find((c) => c.id === cc.classId);
+        const gen = GENRES[cc.genre] || GENRES.fantasy;
+        const cls = gen.classes.find((c) => c.id === cc.classId);
         let body;
         if (cc.step === 1) {
-            body = `<div class="cc-grid">${CLASSES.map((c) => `
+            body = `<div class="cc-genres">${Object.values(GENRES).map((g) =>
+                `<button type="button" class="cc-genre ${g.id === cc.genre ? 'sel' : ''}" data-cc-act="genre" data-id="${g.id}" aria-pressed="${g.id === cc.genre}"><b>${esc(g.name)}</b><span>${esc(g.blurb)}</span></button>`).join('')}</div>
+                <div class="cc-grid">${gen.classes.map((c) => `
                 <button type="button" class="cc-class ${c.id === cc.classId ? 'sel' : ''}" data-cc-act="pick" data-id="${c.id}" aria-pressed="${c.id === cc.classId}">
                     <span class="cc-cname">${esc(c.name)}</span><span class="cc-tag">${esc(c.tag)}</span>
-                    <span class="cc-stats"><b>${c.hp}</b> HP · <b>${c.mana}</b> Mana</span>
-                    <span class="cc-skills">${ABILITIES.map((a) => `${AB_NAME[a]} ${CLASS_KIT[c.id].stats[a]}`).join(' · ')}</span>
-                    <span class="cc-skills">${CLASS_KIT[c.id].gear.filter((g) => g.eq).map((g) => esc(g.name)).join(', ')}</span>
+                    <span class="cc-stats"><b>${c.hp}</b> HP · <b>${c.mana}</b> ${esc(gen.terms.mana)}</span>
+                    <span class="cc-skills">${ABILITIES.map((a) => `${AB_NAME[a]} ${gen.kits[c.id].stats[a]}`).join(' · ')}</span>
+                    <span class="cc-skills">${gen.kits[c.id].gear.filter((g) => g.eq).map((g) => esc(g.name)).join(', ')}</span>
                     <span class="cc-skills">${c.skills.map(([n, r]) => `${esc(n)} ${r}`).join(' · ')}</span>
                 </button>`).join('')}</div>
                 ${cls ? `<div class="cc-traits"><b>${esc(cls.name)}:</b> ${esc(cls.traits)}</div>` : ''}`;
@@ -1209,9 +1309,9 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
                 <label>Backstory (shared with the narrator)<textarea data-cc="backstory" rows="4" placeholder="Where you're from, what drives you, what you're running from…">${esc(cc.backstory)}</textarea></label>
             </div>
             <div class="ogt-section">BONUS SKILL (OPTIONAL, RANK 1)</div>
-            <div class="ogt-chips">${PRESET_SKILLS.filter(([n]) => !owned.has(n)).map(([n, d]) =>
+            <div class="ogt-chips">${gen.skills.filter(([n]) => !owned.has(n)).map(([n, d]) =>
                 `<button class="ogt-chip ${cc.bonus === n ? 'sel' : ''}" data-cc-act="bonus" data-name="${esc(n)}" title="${esc(d)}">${esc(n)}</button>`).join('')}</div>
-            <div class="cc-traits">${esc(cls.name)} · ${cls.hp} HP · ${cls.mana} Mana · starts with ${cls.skills.map(([n, r]) => `${esc(n)} ${r}`).join(', ')}</div>`;
+            <div class="cc-traits">${esc(gen.name)} · ${esc(cls.name)} · ${cls.hp} HP · ${cls.mana} ${esc(gen.terms.mana)} · starts with ${cls.skills.map(([n, r]) => `${esc(n)} ${r}`).join(', ')}</div>`;
         }
         const fresh = !getState().created;
         el.innerHTML = `<div class="cc-modal">
@@ -1227,23 +1327,26 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
     }
 
     function finishCreator() {
-        const cls = CLASSES.find((c) => c.id === cc.classId);
+        const gen = GENRES[cc.genre] || GENRES.fantasy;
+        const cls = gen.classes.find((c) => c.id === cc.classId);
         if (!cls) return;
+        const kit = gen.kits[cls.id];
         const s = getState();
         Object.assign(s, {
+            genre: gen.id,
             name: cc.name.trim() || s.name, class: cls.name, avatar: cc.avatar.trim(), backstory: cc.backstory.trim(),
             traits: cls.traits, growth: { hp: cls.grow[0], mana: cls.grow[1] },
             level: 1, xp: 0, hp: cls.hp, hpMax: cls.hp, mana: cls.mana, manaMax: cls.mana,
             skills: [], skillPoints: 0, created: true,
-            stats: { ...(CLASS_KIT[cls.id]?.stats || s.stats) }, statPoints: 0, inv: [], gold: CLASS_KIT[cls.id]?.gold ?? 0, enemies: [],
+            stats: { ...(kit?.stats || s.stats) }, statPoints: 0, inv: [], gold: kit?.gold ?? 0, enemies: [],
             luck: 1, luckMax: 3,
         });
-        for (const spec of CLASS_KIT[cls.id]?.gear || []) {
+        for (const spec of kit?.gear || []) {
             const it = addItem(s, spec);
             if (it && spec.eq) it.equipped = true;
         }
-        for (const [n, r] of cls.skills) addSkill(s, n, presetDesc(n), { base: r });
-        if (cc.bonus) addSkill(s, cc.bonus, presetDesc(cc.bonus), { base: 1 });
+        for (const [n, r] of cls.skills) addSkill(s, n, presetDescAny(n), { base: r });
+        if (cc.bonus) addSkill(s, cc.bonus, presetDescAny(cc.bonus), { base: 1 });
         closeCreator();
         persist({ manual: true });
         window.toastr?.success(`${s.name} the ${cls.name} is ready.`, APP_NAME);
@@ -1255,6 +1358,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (!t || !cc) return;
         switch (t.dataset.ccAct) {
             case 'close': return closeCreator();
+            case 'genre': if (GENRES[t.dataset.id] && cc.genre !== t.dataset.id) { cc.genre = t.dataset.id; cc.classId = ''; cc.bonus = ''; } return renderCreator();
             case 'pick': cc.classId = t.dataset.id; cc.bonus = ''; return renderCreator();
             case 'next': if (cc.classId) { cc.step = 2; renderCreator(); } return;
             case 'back': cc.step = 1; return renderCreator();
@@ -1284,7 +1388,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
             <div class="ogt-section">SKILLS</div>`;
         h += s.skills.length ? s.skills.map((k) => skillHtml(k, pts, max)).join('') : `<div class="ogt-empty">No skills yet — learn one below, or let the story teach you.</div>`;
         const have = new Set(s.skills.map((k) => k.id));
-        const left = PRESET_SKILLS.filter(([n]) => !have.has(slug(n)));
+        const left = G().skills.filter(([n]) => !have.has(slug(n)));
         if (left.length) {
             h += `<div class="ogt-section">LEARN A SKILL (1 POINT)</div><div class="ogt-chips">${left.map(([n, d]) => `<button class="ogt-chip" data-ogt-act="skill-preset" data-name="${esc(n)}" data-desc="${esc(d)}" ${pts < 1 ? 'disabled' : ''} title="${esc(d)}">${esc(n)}</button>`).join('')}</div>`;
         }
@@ -1300,7 +1404,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (i.type === 'weapon') return `${i.dmg}${i.bonus ? ` +${i.bonus}` : ''} · ${AB_NAME[i.ability]}`;
         if (i.type === 'armor') return `AC ${i.ac}${i.dexCap == null ? ' + DEX' : i.dexCap === 0 ? '' : ` + DEX (max ${i.dexCap})`}`;
         if (i.type === 'shield') return `+${i.ac} AC`;
-        return [i.heal ? `heals ${i.heal}` : '', i.mana ? `mana ${i.mana}` : ''].filter(Boolean).join(' · ');
+        return [i.heal ? `heals ${i.heal}` : '', i.mana ? `${G().terms.mana.toLowerCase()} ${i.mana}` : ''].filter(Boolean).join(' · ');
     }
 
     function itemHtml(i) {
@@ -1324,7 +1428,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         let h = `<div class="ogt-points has"><span>${computeAC(s)}</span> Armor Class
             <small>${a ? esc(a.name) : 'no armor'} ${a ? '' : '(10'} + DEX ${fmtMod(a && a.dexCap != null ? Math.min(dex, a.dexCap) : dex)}${sh ? ` + ${esc(sh.name)} ${sh.ac}` : ''}${a ? '' : ')'}</small></div>
             <div class="ogt-acrow">Weapon: <b>${w ? `${esc(w.name)} ${w.dmg}${w.bonus ? ` +${w.bonus}` : ''}` : 'unarmed 1d2'}</b> · Attack <b>${fmtMod(attackProfile(s).bonus)}</b></div>
-            <label class="ogt-field ogt-inline">Gold<input data-ogt-field="gold" type="number" min="0" value="${s.gold}"></label>`;
+            <label class="ogt-field ogt-inline">${G().terms.cash[0].toUpperCase() + G().terms.cash.slice(1)}<input data-ogt-field="gold" type="number" min="0" value="${s.gold}"></label>`;
         const eq = s.inv.filter((i) => i.equipped), pack = s.inv.filter((i) => !i.equipped);
         h += `<div class="ogt-section">EQUIPPED</div>${eq.length ? eq.map(itemHtml).join('') : '<div class="ogt-empty">Nothing equipped.</div>'}`;
         h += `<div class="ogt-section">PACK</div>${pack.length ? pack.map(itemHtml).join('') : '<div class="ogt-empty">Your pack is empty.</div>'}`;
@@ -1370,6 +1474,8 @@ ${notes.map((t) => '- ' + t).join('\n')}` : '';
             ${chk('trackRel', 'Track NPC relationship scores')}
             <label class="ogt-field">Panel side<select data-ogt-setting="panelSide"><option value="left" ${s.panelSide === 'left' ? 'selected' : ''}>Left</option><option value="right" ${s.panelSide === 'right' ? 'selected' : ''}>Right</option></select></label>
             ${meguminDetected() ? `<div class="ogt-empty">Megumin Suite detected. Let it handle prose, memory, NPC dossiers and images; this panel covers the RPG sheet, quests and relationship scores. If you'd rather use only Megumin's NPC tracking, untick "Track NPC relationship scores".</div>` : ''}
+            <label class="ogt-field">Default genre for new characters<select data-ogt-setting="defaultGenre">${Object.values(GENRES).map((g) => `<option value="${g.id}" ${s.defaultGenre === g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select></label>
+            <div class="ogt-empty">This chat is set in <b>${esc(G().name)}</b>. To change it, re-open the character creator and pick another genre (it rebuilds your class and gear).</div>
             ${chk('collapseMenu', 'Hide ST\'s top icon row behind a menu button')}
             ${chk('dice', 'Dice rolls: skill checks with roll cards')}
             ${chk('luckRerolls', 'Luck: spend a point to reroll a failed check (click-to-roll mode)')}
@@ -1513,9 +1619,9 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
                 if (!item) return;
                 const name = item.name, parts = [];
                 if (item.heal) { const before = state.hp; state.hp = Math.min(state.hpMax, state.hp + rollDice(parseDice(item.heal)).total); parts.push(`restored ${state.hp - before} HP`); }
-                if (item.mana) { const before = state.mana; state.mana = Math.min(state.manaMax, state.mana + rollDice(parseDice(item.mana)).total); parts.push(`restored ${state.mana - before} mana`); }
+                if (item.mana) { const before = state.mana; state.mana = Math.min(state.manaMax, state.mana + rollDice(parseDice(item.mana)).total); parts.push(`restored ${state.mana - before} ${G().terms.mana.toLowerCase()}`); }
                 removeItem(state, name, 1);
-                const text = `${state.name} used ${name}${parts.length ? ': ' + parts.join(', ') : ''} (HP ${state.hp}/${state.hpMax}, Mana ${state.mana}/${state.manaMax}).`;
+                const text = `${state.name} used ${name}${parts.length ? ': ' + parts.join(', ') : ''} (HP ${state.hp}/${state.hpMax}, ${G().terms.mana} ${state.mana}/${state.manaMax}).`;
                 pushNote(text);
                 window.toastr?.success(text, APP_NAME);
                 return persist({ manual: true });

@@ -5,8 +5,12 @@ lets you roll your own dice, and gives the chat a modern look. Everything is sto
 
 ## Features
 
-- **Character sheet** — class, level and XP, HP / Mana, six D&D-style ability scores, derived Armor Class,
-  Luck points. Pregen classes via the **character creator** (Warrior, Rogue, Mage, Cleric, Ranger, Bard, Death Knight).
+- **Genres** — pick **Fantasy** or **Modern** in the character creator. Each has its own classes, starting kits,
+  skill list and wording (Mana ↔ Focus, gold ↔ cash), and the narrator is told the setting. More genres are just data.
+  - Fantasy: Warrior, Rogue, Mage, Cleric, Ranger, Bard, Death Knight
+  - Modern: Soldier, Detective, Hacker, Medic, Fixer, Driver, Brawler (firearms, vehicles, hacking; no magic)
+- **Character sheet** — class, level and XP, HP / Mana-or-Focus, six D&D-style ability scores, derived Armor Class,
+  Luck points. Built with the **character creator**.
 - **Quests & XP** — the narrator picks a difficulty; the game pays the XP when a quest completes (with optional milestones).
 - **Skills** — spend skill points from level-ups. Skill bonus = rank + the governing ability's modifier.
 - **Gear** — weapons, armor, shields, potions; equip and use them from the panel. AC comes from armor + DEX + shield.

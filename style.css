@@ -281,6 +281,11 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 .cc-steps { display: flex; gap: 14px; padding: 8px 16px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--ogt-dim); }
 .cc-steps .on { color: var(--ogt-green); }
 .cc-body { padding: 4px 16px 12px; overflow-y: auto; flex: 1 1 auto; min-height: 0; overscroll-behavior: contain; }
+.cc-genres { display: flex; gap: 8px; margin: 2px 0 12px; }
+.cc-genre { flex: 1; display: flex; flex-direction: column; gap: 2px; text-align: left; font: inherit; color: var(--ogt-text); padding: 10px 12px; border-radius: 10px; cursor: pointer;
+    background: #111; border: 1px solid #2c2c2c; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.cc-genre b { font-size: 14px; } .cc-genre span { font-size: 11px; color: var(--ogt-dim); line-height: 1.3; }
+.cc-genre.sel { border-color: var(--ogt-green); background: #0d1f14; } .cc-genre.sel b { color: var(--ogt-green); }
 .cc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
 /* class cards are real <button>s: iOS Safari doesn't reliably deliver taps to plain <div>s through delegated handlers */
 .cc-class { display: block; width: 100%; text-align: left; font: inherit; color: inherit; padding: 12px; border: 1px solid var(--ogt-line); border-radius: 10px; cursor: pointer; background: linear-gradient(135deg, #1b1608, #0e0b06); transition: border-color .15s, transform .15s; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }

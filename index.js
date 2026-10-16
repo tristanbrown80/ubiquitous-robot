@@ -44,6 +44,11 @@
         collapseMenu: true,
         luckRerolls: true,
         defaultGenre: 'fantasy', // pre-selected in the character creator
+        // testing tools (GM tab → Testing); only take effect while testMode is on
+        testMode: false,
+        testInfiniteLuck: false,
+        testDie: '', // '' = random, otherwise force every d20 to this number
+        testNoDeliver: false, // roll results are not sent to the narrator (no API call)
     };
 
     // base XP by quest difficulty — the model only picks the difficulty, the extension pays out
@@ -810,7 +815,14 @@ Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp 
     // The model chooses skill / DC / modifiers; we recompute the result from your real skill ranks and show a card.
 
     let pendingRoll = null;
-    const d20 = () => { const b = new Uint32Array(1); crypto.getRandomValues(b); return (b[0] % 20) + 1; };
+    const testOn = (k) => !!(settings().testMode && settings()[k]);
+    const d20 = () => {
+        const forced = Math.round(num(settings().testMode ? settings().testDie : 0, 0));
+        if (forced >= 1 && forced <= 20) return forced;
+        const b = new Uint32Array(1); crypto.getRandomValues(b); return (b[0] % 20) + 1;
+    };
+    const hasLuck = (s) => testOn('testInfiniteLuck') || s.luck > 0;
+    const spendLuck = (s) => { if (!testOn('testInfiniteLuck')) s.luck -= 1; };
     const OUTCOMES = {
         crit: 'Critical Success', strong: 'Strong Success', success: 'Success',
         fail: 'Failure', badfail: 'Bad Failure', critfail: 'Critical Failure',
@@ -941,7 +953,7 @@ ${SOCIAL_RULES}${G().prompt.socialExtra || ''}`;
     }
 
     function rollHtml(r, kind = 'roll', sig = JSON.stringify(r), actions = '') {
-        const reTxt = r.rerolled != null ? ` · 🍀 rerolled (was ${r.rerolled})` : '';
+        const reTxt = r.rerolled != null ? ` · 🍀 rerolled${r.rerolls > 1 ? ` ×${r.rerolls}` : ''} (was ${r.rerolled})` : '';
         if (r.kind === 'attack' || r.kind === 'defend') {
             return `<div class="ogt-roll ogt-card out-${r.outcome}" data-kind="${kind}" data-sig="${esc(sig)}">
                 <div class="ogt-die">${r.nat}</div>
@@ -970,8 +982,8 @@ ${SOCIAL_RULES}${G().prompt.socialExtra || ''}`;
     /** Buttons shown on a failed roll while the narrator is still waiting (accepted === false). */
     function decisionHtml(chk, live) {
         if (!live || chk.accepted !== false) return '';
-        const luck = getState().luck;
-        return `<div class="ogt-decide"><button class="ogt-reroll-btn" ${luck > 0 ? '' : 'disabled'} title="Spend 1 Luck and roll again — you must keep the new result">🍀 Reroll · ${luck}</button>
+        const luck = testOn('testInfiniteLuck') ? '∞' : getState().luck;
+        return `<div class="ogt-decide"><button class="ogt-reroll-btn" ${hasLuck(getState()) ? '' : 'disabled'} title="Spend 1 Luck and roll again — you must keep the new result">🍀 Reroll · ${luck}</button>
             <button class="ogt-accept-btn">Accept</button></div>`;
     }
 
@@ -1018,13 +1030,15 @@ ${SOCIAL_RULES}${G().prompt.socialExtra || ''}`;
             const relTxt = k.rel ? ` · ${sign(k.rel)} ${k.npc ? k.npc + "'s" : 'their'} attitude` : '';
             title = `${k.skill} check`; math = `${sign(k.bonus)} ${src}${relTxt}${extra ? ' · ' + extra : ''} · DC ${k.dc}`; btn = 'Roll d20';
         }
+        const advBtn = live && canSpendAdv(k, getState())
+            ? `<div class="ogt-decide"><button class="ogt-adv-btn" title="Spend 1 Luck before rolling">🍀 ${k.kind === 'defend' ? 'Disadvantage on attacker' : 'Advantage'} · ${testOn('testInfiniteLuck') ? '∞' : getState().luck}</button></div>` : '';
         return `<div class="ogt-roll ogt-card ogt-check" data-kind="check" data-sig="${esc(sig)}">
             <div class="ogt-die">d20</div>
             <div class="ogt-roll-main">
                 <div class="ogt-roll-title">${esc(title)}${k.why ? `<span> · ${esc(k.why)}</span>` : ''}</div>
                 <div class="ogt-roll-math">${esc(math)}</div>
             </div>
-            <button class="ogt-check-btn" ${live ? '' : 'disabled'}>${live ? btn : 'Expired'}</button>
+            <button class="ogt-check-btn" ${live ? '' : 'disabled'}>${live ? btn : 'Expired'}</button>${advBtn}
         </div>`;
     }
 
@@ -1041,6 +1055,7 @@ ${SOCIAL_RULES}${G().prompt.socialExtra || ''}`;
 
     /** Hand a finished roll to the narrator. Hidden by default: the result rides along in the prompt and we just trigger a reply. */
     async function deliverRoll(text) {
+        if (testOn('testNoDeliver')) return window.toastr?.info('Test mode: roll result not sent to the narrator.', APP_NAME);
         if (!settings().showRollMsg) {
             const run = ctx().executeSlashCommandsWithOptions;
             if (run) {
@@ -1076,7 +1091,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
 
     const OUTCOME_TXT = { ...OUTCOMES };
     function rollMessage(res, label) {
-        const rr = res.rerolled != null ? ` (the player spent Luck to reroll; the earlier d20 was ${res.rerolled} — this is the final result)` : '';
+        const rr = res.rerolled != null ? ` (the player spent Luck to reroll${res.rerolls > 1 ? ` ${res.rerolls} times` : ''}; the previous d20 was ${res.rerolled} — this is the final result)` : '';
         if (res.text) return `[ROLL] ${res.text}${rr}`;
         const bonus = res.bonus ? ` ${res.bonus >= 0 ? '+' : '−'} ${Math.abs(res.bonus)} ${res.trained ? 'skill' : res.ability ? AB_NAME[res.ability] : ''}`.trimEnd() : '';
         const mod = (res.rel ? ` ${res.rel >= 0 ? '+' : '−'} ${Math.abs(res.rel)} ${res.npc ? res.npc + "'s" : 'their'} attitude` : '')
@@ -1130,8 +1145,9 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         chk.result = res;
         rolling = false;
         // offer a Luck reroll on a bad outcome; otherwise the result goes straight to the narrator
-        const offer = luckOn() && state.luck > 0 && BAD_OUTCOMES.includes(res.outcome);
+        const offer = luckOn() && hasLuck(state) && BAD_OUTCOMES.includes(res.outcome);
         chk.accepted = !offer;
+        if (chk.luckAdv) res.luckAdv = true;
         if (!offer) delete chk.pre;
         if (isCombat(chk)) persist({ manual: true }); else scheduleSave();
         decorateRolls();
@@ -1142,19 +1158,44 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (rolling) return;
         const chk = locateCheck(btn, true);
         const state = getState();
-        if (!chk || !(state.luck > 0)) return;
+        if (!chk || !hasLuck(state)) return;
         await spinDie(btn, 'Rerolling…');
 
-        const c = ctx(), prev = chk.result.nat;
-        state.luck -= 1;
-        if (chk.pre) { state.hp = chk.pre.hp; state.enemies = clone(chk.pre.enemies); } // undo the first roll's damage
+        const prev = chk.result.nat;
+        spendLuck(state);
+        if (chk.pre) { state.hp = chk.pre.hp; state.enemies = clone(chk.pre.enemies); } // undo the previous roll's damage
         const res = resolveCheck(chk, { a: d20(), b: d20() }, state);
         res.rerolled = prev;
-        chk.result = res; chk.accepted = true; delete chk.pre;
+        res.rerolls = (chk.result.rerolls || 0) + 1;
+        chk.result = res;
         rolling = false;
+        // still a bad result and Luck left: keep offering rerolls (each one costs a point and must be kept)
+        const again = luckOn() && hasLuck(state) && BAD_OUTCOMES.includes(res.outcome);
+        chk.accepted = !again;
+        if (!again) delete chk.pre;
         persist({ manual: true });
         decorateRolls();
-        deliverRoll(rollMessage(res, checkLabel(res, chk)));
+        if (!again) deliverRoll(rollMessage(res, checkLabel(res, chk)));
+    }
+
+    /** Spend 1 Luck before rolling: advantage on your own check/attack (cancels disadvantage), or disadvantage on an enemy's attack. */
+    function advStep(chk) { return chk.kind === 'defend' ? -1 : 1; }
+    function canSpendAdv(chk, state) {
+        if (!luckOn() || !hasLuck(state) || chk.result) return false;
+        const adv = Math.sign(num(chk.adv, 0));
+        return advStep(chk) > 0 ? adv < 1 : adv > -1;
+    }
+    function doAdvantage(btn) {
+        if (rolling) return;
+        const chk = locateCheck(btn, false);
+        const state = getState();
+        if (!chk || !canSpendAdv(chk, state)) return;
+        spendLuck(state);
+        chk.adv = clamp(Math.sign(num(chk.adv, 0)) + advStep(chk), -1, 1);
+        chk.luckAdv = true;
+        persist({ manual: true });
+        render();
+        decorateRolls();
     }
 
     function doAccept(btn) {
@@ -1569,6 +1610,54 @@ In this game social interaction IS the gameplay, so lean on checks more than usu
 ${notes.map((t) => '- ' + t).join('\n')}` : '';
     }
 
+    function renderTesting(s) {
+        const btn = (act, label) => `<button class="ogt-btn" data-ogt-act="${act}">${label}</button>`;
+        const combat = hasCombat(getState());
+        return `<div class="ogt-section">TESTING</div>
+            ${['testInfiniteLuck:Infinite Luck (rerolls and advantage cost nothing)', 'testNoDeliver:Don\'t send roll results to the narrator (no API call)']
+                .map((x) => { const [k, label] = x.split(/:(.+)/); return `<label class="ogt-check"><input type="checkbox" data-ogt-setting="${k}" ${s[k] ? 'checked' : ''}> ${label}</label>`; }).join('')}
+            <label class="ogt-field">Force every d20 to<select data-ogt-setting="testDie">
+                ${[['', 'Random (normal)'], ['1', '1 (critical fail)'], ['5', '5'], ['10', '10'], ['15', '15'], ['20', '20 (critical)']].map(([v, l]) => `<option value="${v}" ${String(s.testDie) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+            <div class="ogt-testgrid">
+                ${btn('test-full', 'Full HP / Mana')}${btn('test-luck', 'Max Luck')}${btn('test-xp', '+100 XP')}${btn('test-level', 'Level up')}
+                ${btn('test-gold', '+1000 gold')}${btn('test-points', '+5 skill / +2 ability pts')}
+                ${combat ? btn('test-enemy', 'Add test enemy') + btn('test-clear-enemies', 'Clear enemies') : ''}
+            </div>
+            <div class="ogt-empty">Spawn a roll card on the latest message (no AI reply needed):</div>
+            <div class="ogt-testgrid">
+                ${btn('test-check-skill', 'Skill check')}${btn('test-check-adv', 'Skill (advantage)')}${btn('test-check-dis', 'Skill (disadvantage)')}
+                ${combat ? btn('test-check-attack', 'Attack') + btn('test-check-defend', 'Enemy attack') : ''}
+                ${btn('test-check-clear', 'Remove card')}
+            </div>`;
+    }
+
+    /** Put a test roll card on the newest message so dice, rerolls and advantage can be tried without waiting on the narrator. */
+    function testCheck(kind, adv = 0) {
+        const state = getState(), c = ctx();
+        const msg = c.chat[c.chat.length - 1];
+        if (!msg) return window.toastr?.warning('Send a message first.', APP_NAME);
+        msg.extra = msg.extra || {};
+        if (kind === 'clear') { delete msg.extra.ogt_check; delete msg.extra.ogt_roll; }
+        else {
+            const base = { mod: 0, adv, why: 'test roll' };
+            if (kind === 'attack') {
+                const foe = state.enemies.find((e) => !e.defeated) || addEnemy(state, { name: 'Training Dummy', hp: 20, ac: 12 });
+                msg.extra.ogt_check = { ...base, kind: 'attack', spell: false, target: foe.name, ac: foe.ac, bonus: attackProfile(state, false).bonus };
+            } else if (kind === 'defend') {
+                msg.extra.ogt_check = { ...base, kind: 'defend', enemy: 'Test Goblin', atk: 3, dmg: '1d6', ac: computeAC(state) };
+            } else {
+                const sk = state.skills[0];
+                msg.extra.ogt_check = {
+                    ...base, kind: 'skill', trained: !!sk, ability: sk ? abilityOf(sk) : null, skill: sk?.name || 'Unskilled',
+                    bonus: sk ? skillBonus(state, sk) : 0, rel: 0, dc: 15,
+                };
+            }
+            delete msg.extra.ogt_roll;
+        }
+        persist({ manual: true });
+        decorateRolls();
+    }
+
     function renderGM() {
         const s = settings();
         const chk = (k, label) => `<label class="ogt-check"><input type="checkbox" data-ogt-setting="${k}" ${s[k] ? 'checked' : ''}> ${label}</label>`;
@@ -1601,6 +1690,8 @@ ${notes.map((t) => '- ' + t).join('\n')}` : '';
             <div class="ogt-empty">${esc(lastStatus)}</div>
             <label class="ogt-field">Injection depth<input type="number" min="0" max="20" data-ogt-setting="depth" value="${s.depth}"></label>
             <label class="ogt-field">Extra GM rules<textarea data-ogt-setting="extraRules" rows="4" placeholder="e.g. Combat is dangerous. Death Knights regain no HP from resting.">${esc(s.extraRules)}</textarea></label>
+            ${chk('testMode', 'Testing tools (for debugging; hidden when off)')}
+            ${s.testMode ? renderTesting(s) : ''}
             <button class="ogt-btn ogt-wide" data-ogt-act="scan">Scan story for missed updates</button>
             <button class="ogt-btn ogt-wide danger" data-ogt-act="reset">Reset tracker for this chat</button>
             <div class="ogt-empty">State is saved per chat and snapshotted on every reply, so swipes and deletes roll it back correctly.</div>`;
@@ -1788,6 +1879,25 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
                 }
                 return;
             case 'scan': return scanStory();
+            case 'test-full': state.hp = state.hpMax; state.mana = state.manaMax; return persist({ manual: true });
+            case 'test-luck': state.luck = state.luckMax; return persist({ manual: true });
+            case 'test-xp': { const n = []; gainXp(state, Math.ceil(100 / Math.max(0.01, num(settings().xpMult, 1))), n); n.forEach(([t, m]) => window.toastr?.[t]?.(m, APP_NAME)); return persist({ manual: true }); }
+            case 'test-level': {
+                const n = [];
+                gainXp(state, Math.ceil((xpNeeded(state.level) - state.xp) / Math.max(0.01, num(settings().xpMult, 1))), n);
+                n.forEach(([t, m]) => window.toastr?.[t]?.(m, APP_NAME));
+                return persist({ manual: true });
+            }
+            case 'test-gold': state.gold += 1000; return persist({ manual: true });
+            case 'test-points': state.skillPoints = (state.skillPoints || 0) + 5; state.statPoints = (state.statPoints || 0) + 2; return persist({ manual: true });
+            case 'test-enemy': addEnemy(state, { name: 'Test Goblin', hp: 20, ac: 12 }); return persist({ manual: true });
+            case 'test-clear-enemies': state.enemies = []; return persist({ manual: true });
+            case 'test-check-skill': return testCheck('skill');
+            case 'test-check-adv': return testCheck('skill', 1);
+            case 'test-check-dis': return testCheck('skill', -1);
+            case 'test-check-attack': return testCheck('attack');
+            case 'test-check-defend': return testCheck('defend');
+            case 'test-check-clear': return testCheck('clear');
             case 'reset':
                 if (confirm('Reset all tracked stats, relationships and quests for this chat?')) {
                     const md = ctx().chatMetadata;
@@ -1868,6 +1978,8 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             if (b) return doCheckRoll(b);
             const rr = e.target.closest('.ogt-reroll-btn');
             if (rr) return doReroll(rr);
+            const av = e.target.closest('.ogt-adv-btn');
+            if (av) return doAdvantage(av);
             const ac = e.target.closest('.ogt-accept-btn');
             if (ac) doAccept(ac);
         });

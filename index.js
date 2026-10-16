@@ -16,8 +16,10 @@
     const MODULE = 'hearthlight';            // settings / prompt key
     const LEGACY_MODULES = ['old_gregs_tavern']; // earlier names whose saved settings are migrated
     // accepts <!--OGT:{}-->, <ogt>{}</ogt>, [[OGT:{}]]
-    const TAG_RE = /<!--\s*OGT:?([\s\S]*?)-->|<ogt>([\s\S]*?)<\/ogt>|\[\[OGT:?([\s\S]*?)\]\]/gi;
+    // an unclosed <!--OGT: (reply cut off by the token limit) runs to the end of the text; parseTags repairs the JSON
+    const TAG_RE = /<!--\s*OGT:?([\s\S]*?)(?:-->|$)|<ogt>([\s\S]*?)<\/ogt>|\[\[OGT:?([\s\S]*?)\]\]/gi;
     let lastStatus = 'No reply seen yet.';
+    let parseIssues = { repaired: 0, failed: 0 }; // set by parseTags for the most recent reply
     const ctx = () => SillyTavern.getContext();
 
     const DEFAULT_SETTINGS = {
@@ -381,13 +383,15 @@
         const notes = [];
         if (typeof d !== 'object' || !d) return notes;
 
-        if (d.class) s.class = String(d.class);
-        if (d.hp) s.hp = clamp(s.hp + num(d.hp), 0, s.hpMax);
-        if (d.mana) s.mana = clamp(s.mana + num(d.mana), 0, s.manaMax);
+        // sanity limits on what a single reply can change, so a confused model can't wreck the sheet
+        const text = (v, n) => String(v).slice(0, n);
+        if (d.class) s.class = text(d.class, 30);
+        if (d.hp) s.hp = clamp(s.hp + clamp(num(d.hp), -s.hpMax, s.hpMax), 0, s.hpMax);
+        if (d.mana) s.mana = clamp(s.mana + clamp(num(d.mana), -s.manaMax, s.manaMax), 0, s.manaMax);
 
         if (d.xp) {
             const mode = settings().xpMode;
-            if (mode === 'free') gainXp(s, num(d.xp), notes);
+            if (mode === 'free') gainXp(s, clamp(num(d.xp), 0, 100), notes);
             else if (mode === 'mixed') gainXp(s, clamp(num(d.xp), 0, MIXED_CAP), notes);
             // 'quests' mode: loose XP from the model is ignored
         }
@@ -429,18 +433,21 @@
         }
 
         if (d.scene && typeof d.scene === 'object') {
-            for (const k of ['region', 'location', 'time']) if (d.scene[k]) s.scene[k] = String(d.scene[k]);
+            for (const k of ['region', 'location', 'time']) if (d.scene[k]) s.scene[k] = text(d.scene[k], 80);
         }
 
         if (d.rel && typeof d.rel === 'object') {
-            for (const [name, v] of Object.entries(d.rel)) {
+            const REL_STEP = 25; // max swing per NPC per reply
+            for (const [rawName, v] of Object.entries(d.rel).slice(0, 6)) {
+                const name = text(rawName, 40).trim();
+                if (!name) continue;
                 const r = s.rel[name] || { value: 0, note: '' };
                 const before = tierOf(r.value);
-                if (typeof v === 'number') r.value += v;
+                if (typeof v === 'number') r.value += clamp(v, -REL_STEP, REL_STEP);
                 else if (v && typeof v === 'object') {
-                    if (v.set !== undefined) r.value = num(v.set);
-                    if (v.delta) r.value += num(v.delta);
-                    if (v.note) r.note = String(v.note);
+                    if (v.set !== undefined) r.value = clamp(num(v.set), r.value - REL_STEP, r.value + REL_STEP);
+                    if (v.delta) r.value += clamp(num(v.delta), -REL_STEP, REL_STEP);
+                    if (v.note) r.note = text(v.note, 120);
                 }
                 r.value = clamp(Math.round(r.value), -100, 100);
                 s.rel[name] = r;
@@ -452,20 +459,20 @@
         const q = d.quests;
         if (q && typeof q === 'object') {
             const find = (ref) => s.quests.find((x) => x.id === ref || x.title.toLowerCase() === String(ref).toLowerCase());
-            for (const a of q.add || []) {
+            for (const a of [].concat(q.add || []).slice(0, 3)) {
                 if (!a?.title || find(a.id || a.title)) continue;
                 s.quests.push({
-                    id: a.id || `q${Date.now().toString(36)}${s.quests.length}`,
-                    title: String(a.title), desc: String(a.desc || ''), progress: '', status: 'active',
+                    id: a.id ? text(a.id, 40) : `q${Date.now().toString(36)}${s.quests.length}`,
+                    title: text(a.title, 80), desc: text(a.desc || '', 200), progress: '', status: 'active',
                     difficulty: normDiff(a.difficulty), xp: DIFFICULTY[normDiff(a.difficulty)], paid: 0, ms: 0, awarded: false,
                 });
                 notes.push(['info', `New quest: ${a.title}`]);
             }
-            for (const u of q.update || []) {
+            for (const u of [].concat(q.update || []).slice(0, 6)) {
                 const t = find(u?.id || u?.title);
                 if (!t) continue;
-                if (u.progress) t.progress = String(u.progress);
-                if (u.desc) t.desc = String(u.desc);
+                if (u.progress) t.progress = text(u.progress, 200);
+                if (u.desc) t.desc = text(u.desc, 200);
                 if (u.milestone && t.status === 'active' && (t.ms || 0) < MILESTONE_MAX) {
                     t.ms = (t.ms || 0) + 1;
                     const part = Math.round(questReward(t) * MILESTONE_SHARE);
@@ -492,20 +499,41 @@
     const hasTags = (text) => new RegExp(TAG_RE.source, 'i').test(text) || new RegExp(BARE_RE.source, 'im').test(text);
     const stripTags = (text) => text.replace(TAG_RE, '').replace(BARE_RE, '').replace(/\n{3,}/g, '\n\n').trimEnd();
 
+    // Close whatever a truncated JSON payload left open (string, arrays, objects) so a cut-off tag still applies.
+    function repairJson(raw) {
+        const stack = [];
+        let inStr = false, esc = false;
+        for (const ch of raw) {
+            if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+            if (ch === '"') inStr = true;
+            else if (ch === '{') stack.push('}');
+            else if (ch === '[') stack.push(']');
+            else if (ch === '}' || ch === ']') stack.pop();
+        }
+        let out = raw;
+        if (inStr) out += esc ? '\\"' : '"';
+        out = out.replace(/[,:]\s*$/, (m) => (m.trim() === ':' ? ':null' : ''));
+        return out + stack.reverse().join('');
+    }
+
     function parseTags(text) {
         const deltas = [];
         let m;
+        parseIssues = { repaired: 0, failed: 0 };
         TAG_RE.lastIndex = 0;
         while ((m = TAG_RE.exec(text))) {
             const raw = (m[1] ?? m[2] ?? m[3] ?? '').trim().replace(/^```(?:json)?|```$/g, '').trim();
-            try { deltas.push(JSON.parse(raw)); } catch (e) { console.warn(`[${MODULE}] bad OGT json`, raw); }
+            try { deltas.push(JSON.parse(raw)); } catch (e) {
+                try { deltas.push(JSON.parse(repairJson(raw))); parseIssues.repaired++; console.warn(`[${MODULE}] repaired truncated OGT json`); }
+                catch (e2) { parseIssues.failed++; console.warn(`[${MODULE}] bad OGT json`, raw); }
+            }
         }
         BARE_RE.lastIndex = 0;
         while ((m = BARE_RE.exec(text))) {
             try {
                 if (m[1]) deltas.push(JSON.parse(m[1]));
                 else deltas.push({ [m[2].toLowerCase()]: JSON.parse(m[3]) });
-            } catch (e) { console.warn(`[${MODULE}] bad bare OGT json`, m[0]); }
+            } catch (e) { parseIssues.failed++; console.warn(`[${MODULE}] bad bare OGT json`, m[0]); }
         }
         return deltas;
     }
@@ -532,6 +560,13 @@
         const notes = [];
         const deltas = parseTags(msg.mes);
         for (const d of deltas) notes.push(...applyDelta(state, d));
+        if (parseIssues.failed) {
+            lastStatus = 'Last reply: tracker tag was unreadable' + (parseIssues.repaired ? ' (one part repaired)' : '') + ' — some updates were lost. Try the scan button.';
+            notes.push(['warning', 'Tracker tag was cut off or malformed']);
+        } else if (parseIssues.repaired) {
+            lastStatus = 'Last reply: tracker tag was cut off and repaired — check it applied everything.';
+            notes.push(['warning', 'Tracker tag was cut off — repaired']);
+        }
 
         msg.mes = stripTags(msg.mes);
         msg.extra = msg.extra || {};
@@ -629,7 +664,7 @@ ${combat ? ` "enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":
            "complete":["short_id"],"fail":["short_id"]}}
 Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS (hp negative for damage, positive for healing).` : (settings().xpMode === 'quests' ? '' : 'xp is a DELTA.')} ${settings().xpMode === 'quests'
     ? 'Do NOT award xp yourself — the game pays XP automatically when a quest is completed. When a quest begins, pick its "difficulty" honestly relative to the player\'s level (trivial: errand; easy: minor risk; medium: real danger or effort; hard: serious threat; deadly: likely lethal). Add "milestone":true to a quest update only when a major objective step is genuinely finished (max 3 per quest). Put a quest id in "complete" only when its goal is fully achieved.'
-    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes. Valid JSON only, on a single line.${extra ? '\n' + extra : ''}${diceBlock(s)}${resultBlock()}${notesBlock()}`;
+    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes. Valid JSON only, on a single line. Keep the whole comment SHORT (under ~300 characters): only changed fields, short ids, and "note"/"progress" text of at most 8 words. Always finish it with the closing }-->.${extra ? '\n' + extra : ''}${diceBlock(s)}${resultBlock()}${notesBlock()}`;
     }
 
     function refreshPrompt() {

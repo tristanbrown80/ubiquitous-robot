@@ -135,6 +135,8 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
     background: #101216; color: #e9b872; border: 1px solid #e9b872; box-shadow: 0 0 12px rgba(233, 184, 114, .35);
 }
 #ogt-toggle.open { display: none; }
+#ogt-toggle, #ogt-menu-btn { cursor: grab; user-select: none; -webkit-user-select: none; }
+#ogt-toggle.ogt-dragging, #ogt-menu-btn.ogt-dragging { cursor: grabbing; opacity: .85; transition: none; }
 
 #ogt-panel {
     --ogt-bg: #0b0d10; --ogt-card: #101216; --ogt-line: #23262d;
@@ -269,6 +271,7 @@ body.ogt-theme #ogt-panel .ogt-fill.xp { color: rgba(74, 222, 128, .5); }
 .ogt-log-row.ally.hit span:last-child { color: #86efac; } .ogt-log-row.foe.hit span:last-child { color: #f87171; }
 .ogt-target { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ogt-dim); }
 .ogt-target-sel { background: #131316; color: #e8e6e1; border: 1px solid #3a3a42; border-radius: 6px; padding: 5px; font-size: 12px; }
+.ogt-give-sel { background: #131316; color: #e8e6e1; border: 1px solid #3a3a42; border-radius: 6px; padding: 3px 4px; font-size: 11px; max-width: 110px; }
 .ogt-testgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 6px 0 10px; }
 .ogt-testgrid .ogt-btn { margin: 0; }
 .ogt-adv-btn { padding: 7px 14px; border-radius: 8px; cursor: pointer; font-weight: 700; font-size: 12px; letter-spacing: .04em; border: 1px solid #86efac; color: #86efac; background: transparent; }

@@ -104,6 +104,17 @@
     const clone = (o) => JSON.parse(JSON.stringify(o));
     const xpNeeded = (lvl) => 30 * lvl;
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    // Names that come from the model end up as object keys (relationships); never let one be a prototype key.
+    const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+    const safeName = (n, max = 40) => { const v = String(n ?? '').trim().slice(0, max); return v && !UNSAFE_KEYS.has(v.toLowerCase()) ? v : ''; };
+    // Toast text may contain model-written names/titles and toastr can render HTML, so drop angle brackets.
+    const notify = (type, msg, title = APP_NAME) => window.toastr?.[type]?.(String(msg).replace(/[<>]/g, ''), title);
+    /** A URL that is safe to drop inside a CSS url('…'): web/data-image/relative only, every other character percent-encoded. */
+    const cssUrl = (u) => {
+        const v = String(u ?? '').trim();
+        if (!/^(https?:\/\/|data:image\/|\/|[\w.%-]+\/)/i.test(v)) return '';
+        return v.replace(/[^\w\-./:?=&%#@~+,;!*$]/g, (c) => (c.charCodeAt(0) < 128 ? '%' + c.charCodeAt(0).toString(16).padStart(2, '0') : encodeURIComponent(c)));
+    };
     const tierOf = (v) => TIERS.reduce((t, [min, label]) => (v >= min ? label : t), TIERS[0][1]);
 
     function defaultState() {
@@ -140,6 +151,7 @@
         if (!Array.isArray(o.enemies)) o.enemies = [];
         if (!Array.isArray(o.party)) o.party = [];
         if (!Array.isArray(o.log)) o.log = [];
+        o.party.forEach((p) => { if (!Array.isArray(p.inv)) p.inv = []; if (!Number.isFinite(p.baseAc)) p.baseAc = p.ac; });
         if (!Number.isFinite(o.luckMax)) o.luckMax = 3;
         if (!Number.isFinite(o.luck)) o.luck = 1;
         if (!o.genre) o.genre = 'fantasy'; // chats from before genres were fantasy
@@ -334,12 +346,68 @@
         const manaMax = clamp(Math.round(num(m.manaMax ?? m.mana, 0)), 0, 200);
         const p = {
             id, name, class: String(m.class || 'Companion').slice(0, 30), level: clamp(Math.round(num(m.level, s.level)), 1, 20),
-            hp: hpMax, hpMax, mana: manaMax, manaMax, ac: clamp(Math.round(num(m.ac, 12)), 5, 25),
-            skills: normSkills(m.skills), note: String(m.note || '').slice(0, 120),
+            hp: hpMax, hpMax, mana: manaMax, manaMax, ac: clamp(Math.round(num(m.ac, 12)), 5, 25), baseAc: clamp(Math.round(num(m.ac, 12)), 5, 25),
+            skills: normSkills(m.skills), note: String(m.note || '').slice(0, 120), inv: [],
         };
+        for (const it of [].concat(m.inv || []).slice(0, 8)) addToBag(p.inv, it, s.level);
         s.party.push(p);
         return p;
     }
+
+    // ── shared gear: the player and each companion carry their own bag; items can be handed back and forth ──
+    const BAG_MAX = 30; // distinct stacks a companion can carry (the player's pack is uncapped)
+    /** 'player' → your pack, otherwise a party member's id. */
+    const bagOf = (s, id) => (id === 'player' ? s.inv : s.party.find((p) => p.id === id)?.inv || null);
+    const bagName = (s, id) => (id === 'player' ? s.name : s.party.find((p) => p.id === id)?.name || '?');
+
+    function addToBag(bag, it, level, max = BAG_MAX) {
+        if (!it?.name || !slug(it.name)) return null;
+        const n = normItem(it, level);
+        const have = bag.find((x) => x.id === n.id && x.type === n.type);
+        if (have) { have.qty = clamp(have.qty + n.qty, 1, 99); return have; }
+        if (bag.length >= max) return null;
+        bag.push(n);
+        return n;
+    }
+    function findInBag(bag, { id, type, name }) {
+        const q = slug(name || id || '');
+        return bag.find((x) => id && x.id === id && (!type || x.type === type)) || bag.find((x) => q && x.id === q)
+            || bag.find((x) => q && (x.id.includes(q) || q.includes(x.id))) || null;
+    }
+    /** Move up to `qty` of an item between two bags. Returns {item, qty} or null if nothing could be moved. */
+    function transferItem(s, { id, type, name, from, to, qty = 1 }) {
+        const src = bagOf(s, from), dst = bagOf(s, to);
+        if (!src || !dst || from === to) return null;
+        const it = findInBag(src, { id, type, name });
+        if (!it) return null;
+        let n = clamp(Math.round(num(qty, 1)), 1, it.qty);
+        const have = dst.find((x) => x.id === it.id && x.type === it.type);
+        if (have) n = Math.min(n, 99 - have.qty);
+        if (n <= 0) return null;
+        const moved = addToBag(dst, { ...it, qty: n }, s.level, to === 'player' ? Infinity : BAG_MAX);
+        if (!moved) return null;
+        it.qty -= n;
+        if (it.qty <= 0) src.splice(src.indexOf(it), 1);
+        return { item: moved, qty: n };
+    }
+    const equippedIn = (bag, type) => bag.find((i) => i.type === type && i.equipped) || null;
+    /** A companion's AC comes from what they wear: armor replaces their base AC, a shield adds to it. Call after anything that changes a bag. */
+    function recalcParty(s) {
+        for (const p of s.party) {
+            const armor = equippedIn(p.inv, 'armor'), shield = equippedIn(p.inv, 'shield');
+            if (!Number.isFinite(p.baseAc)) p.baseAc = p.ac;
+            p.ac = clamp((armor ? armor.ac : p.baseAc) + (shield ? shield.ac : 0), 5, 25);
+        }
+    }
+
+    /** A companion leaves: whatever they carried goes into the player's pack. Returns how many stacks moved. */
+    function returnGear(s, p) {
+        let n = 0;
+        for (const it of p.inv || []) if (addToBag(s.inv, it, s.level, Infinity)) n++;
+        p.inv = [];
+        return n;
+    }
+    const itemsText = (bag) => bag.slice(0, 8).map((i) => (i.qty > 1 ? `${i.name} ×${i.qty}` : i.name)).join(', ');
 
     // ───────────────────────── skills ─────────────────────────
     // A new skill costs 1 point (rank 1). Raising rank r → r+1 costs r+1 points. Total to master (5) = 15.
@@ -400,6 +468,7 @@
         const c = ctx();
         const md = c.chatMetadata;
         if (!md) return;
+        recalcParty(getState());
         syncInitiative(getState());
         if (manual) {
             // keep hand edits alive across swipe/delete resyncs
@@ -530,9 +599,9 @@
         if (d.rel && typeof d.rel === 'object') {
             const REL_STEP = 25; // max swing per NPC per reply
             for (const [rawName, v] of Object.entries(d.rel).slice(0, 6)) {
-                const name = text(rawName, 40).trim();
+                const name = safeName(rawName);
                 if (!name) continue;
-                const r = s.rel[name] || { value: 0, note: '' };
+                const r = Object.hasOwn(s.rel, name) ? s.rel[name] : { value: 0, note: '' };
                 const before = tierOf(r.value);
                 if (typeof v === 'number') r.value += clamp(v, -REL_STEP, REL_STEP);
                 else if (v && typeof v === 'object') {
@@ -566,11 +635,37 @@
                     const have = p.skills.find((x) => x.name.toLowerCase() === k.name.toLowerCase());
                     if (have) have.rank = k.rank; else if (p.skills.length < 12) p.skills.push(k);
                 }
+                if (u.inv && typeof u.inv === 'object') { // loot picked up / things used up by this companion
+                    for (const it of [].concat(u.inv.add || []).slice(0, 3)) {
+                        const added = addToBag(p.inv, it, s.level);
+                        if (added) notes.push(['info', `${p.name} gained: ${added.name}`]);
+                    }
+                    for (const it of [].concat(u.inv.remove || []).slice(0, 3)) {
+                        const found = findInBag(p.inv, { name: typeof it === 'string' ? it : it?.name });
+                        if (found) { found.qty -= Math.max(1, Math.round(num(it?.qty, 1))); if (found.qty <= 0) p.inv.splice(p.inv.indexOf(found), 1); }
+                    }
+                }
                 if (combat && was > 0 && p.hp === 0) notes.push(['warning', `${p.name} is down!`]);
+            }
+            // handing gear between the player and companions (or between companions)
+            const holder = (ref) => {
+                const r = slug(ref ?? '');
+                if (!r) return null;
+                return ['player', 'you', 'me'].includes(r) || r === slug(s.name) ? 'player' : findMember(s, ref)?.id || null;
+            };
+            for (const t of [].concat(d.party.transfer || []).slice(0, 4)) {
+                const from = holder(t?.from ?? 'player'), to = holder(t?.to);
+                if (!from || !to) continue;
+                const r = transferItem(s, { name: t.item ?? t.name, from, to, qty: t.qty });
+                if (r) notes.push(['info', `${bagName(s, from)} gave ${r.item.name}${r.qty > 1 ? ` ×${r.qty}` : ''} to ${bagName(s, to)}`]);
             }
             for (const ref of [].concat(d.party.remove || []).slice(0, 3)) {
                 const p = findMember(s, typeof ref === 'string' ? ref : ref?.name);
-                if (p) { s.party = s.party.filter((x) => x !== p); notes.push(['info', `${p.name} left the party`]); }
+                if (p) {
+                    const gear = returnGear(s, p);
+                    s.party = s.party.filter((x) => x !== p);
+                    notes.push(['info', `${p.name} left the party${gear ? ` — their gear (${gear} item${gear === 1 ? '' : 's'}) went back to your pack` : ''}`]);
+                }
             }
         }
 
@@ -616,8 +711,11 @@
                 if (!who || !target) continue;
                 const hit = a.hit !== false && a.hit !== 0 && a.hit !== 'false';
                 const crit = hit && !!a.crit;
-                const dmg = hit ? clamp(Math.round(num(a.dmg, 0)), 0, 200) : 0;
+                let dmg = hit ? clamp(Math.round(num(a.dmg, 0)), 0, 200) : 0;
                 const ally = findMember(s, who), isPlayer = slug(who) === slug(s.name);
+                // a companion's wielded weapon decides the damage: the narrator only says hit or miss
+                const wpn = ally ? equippedIn(ally.inv, 'weapon') : null;
+                if (hit && wpn && parseDice(wpn.dmg, ally.level)) dmg = Math.max(1, rollDice(parseDice(wpn.dmg, ally.level), { crit, extra: wpn.bonus || 0 }).total);
                 const side = ally || isPlayer ? 'ally' : 'foe';
                 const foe = side === 'ally' ? findEnemy(s, target) : null;
                 if (foe && dmg) {
@@ -706,6 +804,7 @@
         const notes = [];
         const deltas = parseTags(msg.mes);
         for (const d of deltas) notes.push(...applyDelta(state, d));
+        recalcParty(state);
         syncInitiative(state);
         if (parseIssues.failed) {
             lastStatus = 'Last reply: tracker tag was unreadable' + (parseIssues.repaired ? ' (one part repaired)' : '') + ' — some updates were lost. Try the scan button.';
@@ -764,7 +863,7 @@
         const done = state.quests.filter((q) => q.status !== 'active'); // don't let finished quests pile up forever
         if (done.length > 30) state.quests = state.quests.filter((q) => q.status === 'active' || done.indexOf(q) >= done.length - 30);
         persist(); // single debounced save (SillyTavern also saves the chat itself after each reply)
-        if (s.toasts) notes.forEach(([type, text]) => window.toastr?.[type]?.(text, APP_NAME));
+        if (s.toasts) notes.forEach(([type, text]) => notify(type, text));
     }
 
     // ───────────────────────── prompt injection ─────────────────────────
@@ -799,6 +898,8 @@
                 name: p.name, class: p.class, level: p.level,
                 hp: combat ? `${p.hp}/${p.hpMax}${p.hp === 0 ? ' DOWN' : ''}` : undefined, mana: combat && p.manaMax ? `${p.mana}/${p.manaMax}` : undefined,
                 ac: combat ? p.ac : undefined, skills: p.skills.length ? Object.fromEntries(p.skills.map((k) => [k.name, k.rank])) : undefined, note: p.note || undefined,
+                carrying: p.inv.length ? itemsText(p.inv) : undefined,
+                equipped: combat && p.inv.some((i) => i.equipped) ? p.inv.filter((i) => i.equipped).map((i) => (i.type === 'weapon' ? `${i.name} (${i.dmg})` : i.name)).join(', ') : undefined,
             })) : undefined,
             quests: s.quests.filter((q) => q.status === 'active').slice(-8).map((q) => ({ id: q.id, title: q.title, desc: String(q.desc || '').slice(0, 100), progress: String(q.progress || '').slice(0, 100), difficulty: q.difficulty, reward: `${questReward(q)} XP` })),
         };
@@ -815,12 +916,12 @@ Schema (omit anything unchanged; use {} content only if nothing changed — or o
 {${combat ? '"hp":-3,"mana":-1,' : ''}${settings().xpMode === 'quests' ? '' : '"xp":5,'}"class":"${G().prompt.classExample}",
  "scene":{${G().prompt.sceneExample}},
 ${settings().trackRel ? ` "rel":{"${G().prompt.npcExample}":{"delta":5,"note":"short reason / how they feel"}},\n` : ''}${settings().modelUnlockSkills ? ' "skills":{"unlock":[{"name":"Lockpicking","desc":"one line"}]},\n' : ''} "inv":${G().prompt.invExample},
-${combat ? ` "enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":13}],"clear":true},\n` : ''}${settings().trackParty ? ` "party":{"add":[{"name":"Mira","class":"Rogue","level":2${combat ? ',"hp":22,"mana":0,"ac":13' : ''},"skills":[["Stealth",3]]}],"update":[{"name":"Mira"${combat ? ',"hp":-4' : ''},"note":"short"}],"remove":["Mira"]},\n` : ''} "quests":{"add":[{"id":"short_id","title":"Quest title","desc":"one line objective","difficulty":"trivial|easy|medium|hard|deadly"}],
+${combat ? ` "enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":13}],"clear":true},\n` : ''}${settings().trackParty ? ` "party":{"add":[{"name":"Mira","class":"Rogue","level":2${combat ? ',"hp":22,"mana":0,"ac":13' : ''},"skills":[["Stealth",3]]}],"update":[{"name":"Mira"${combat ? ',"hp":-4' : ''},"note":"short"}],"transfer":[{"item":"Healing Potion","from":"player","to":"Mira","qty":1}],"remove":["Mira"]},\n` : ''} "quests":{"add":[{"id":"short_id","title":"Quest title","desc":"one line objective","difficulty":"trivial|easy|medium|hard|deadly"}],
            "update":[{"id":"short_id","progress":"what's done / what's next","milestone":true}],
            "complete":["short_id"],"fail":["short_id"]}}
 Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS (hp negative for damage, positive for healing).` : (settings().xpMode === 'quests' ? '' : 'xp is a DELTA.')} ${settings().xpMode === 'quests'
     ? 'Do NOT award xp yourself — the game pays XP automatically when a quest is completed. When a quest begins, pick its "difficulty" honestly relative to the player\'s level (trivial: errand; easy: minor risk; medium: real danger or effort; hard: serious threat; deadly: likely lethal). Add "milestone":true to a quest update only when a major objective step is genuinely finished (max 3 per quest). Put a quest id in "complete" only when its goal is fully achieved.'
-    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes.${settings().trackParty ? ` Party: "party.add" only when a named ally actually joins the player's group for the journey (not passing NPCs; max ${PARTY_MAX} members); give sensible stats for their class and level.${combat ? ' "party.update" hp/mana are DELTAS (negative for damage) — apply them whenever a party member is hurt, healed or spends mana, and resolve their actions yourself, without dice.' : ''} Use "party.remove" when they leave, die or are lost for good.` : ''} Valid JSON only, on a single line. Keep the whole comment SHORT (under ~300 characters): only changed fields, short ids, and "note"/"progress" text of at most 8 words. Always finish it with the closing }-->.${extra ? '\n' + extra : ''}${diceBlock(s)}${resultBlock()}${notesBlock()}`;
+    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes.${settings().trackParty ? ` Party: "party.add" only when a named ally actually joins the player's group for the journey (not passing NPCs; max ${PARTY_MAX} members); give sensible stats for their class and level.${combat ? ' "party.update" hp/mana are DELTAS (negative for damage) — apply them whenever a party member is hurt, healed or spends mana, and resolve their actions yourself, without dice.' : ''} Companions carry their own gear (see "carrying"): when the player hands an item to one (or takes it back, or one gives another something) report "party.transfer" with the item name, from/to ("player" or the member's name) and qty — only items that exist in the giver's bag can move. Loot a companion picks up or items they use up go in that member's "party.update" as "inv":{"add":[…],"remove":["Healing Potion"]}. Use "party.remove" when they leave, die or are lost for good (their gear returns to the player's pack).` : ''} Valid JSON only, on a single line. Keep the whole comment SHORT (under ~300 characters): only changed fields, short ids, and "note"/"progress" text of at most 8 words. Always finish it with the closing }-->.${extra ? '\n' + extra : ''}${diceBlock(s)}${resultBlock()}${notesBlock()}`;
     }
 
     function refreshPrompt() {
@@ -857,7 +958,7 @@ Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp 
         const field = (k, label, type = 'number') =>
             `<label>${label}<input data-ogt-field="${k}" type="${type}" value="${esc(s[k])}"></label>`;
         let h = `<div class="ogt-card">
-            <div class="ogt-portrait" style="${av ? `background-image:url('${esc(av)}')` : ''}">${av ? '' : `<span>${esc(s.name[0] || '?')}</span>`}</div>
+            <div class="ogt-portrait" style="${cssUrl(av) ? `background-image:url('${esc(cssUrl(av))}')` : ''}">${cssUrl(av) ? '' : `<span>${esc(s.name[0] || '?')}</span>`}</div>
             ${combat ? `<div class="ogt-ac" title="Armor Class">🛡 ${computeAC(s)}</div>` : ''}
             <div class="ogt-card-text"><div class="ogt-name">${esc(s.name)}</div><div class="ogt-class">${esc(s.class)}</div></div>
         </div>
@@ -974,14 +1075,16 @@ Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp 
                     ${combat ? `<div class="ogt-stats">${bar('HP', 'hp', p.hp, p.hpMax)}${p.manaMax ? bar(G().terms.mana.toUpperCase(), 'mana', p.mana, p.manaMax) : ''}</div>` : ''}
                     ${p.skills.length ? `<div class="ogt-pm-skills">${p.skills.map((k) => `<span class="ogt-xpchip">${esc(k.name)} ${k.rank}</span>`).join('')}</div>` : ''}
                     ${p.note ? `<div class="ogt-note">${esc(p.note)}</div>` : ''}
-                    ${open ? `${combat ? `<div class="ogt-pm-quick">
+                    ${!open && p.inv.length ? `<div class="ogt-note">🎒 ${esc(itemsText(p.inv))}</div>` : ''}
+                    ${open ? `<div class="ogt-section">CARRYING</div>${p.inv.length ? p.inv.map((i) => memberItemHtml(s, p, i)).join('') : '<div class="ogt-empty">Nothing. Hand them something from your Gear tab.</div>'}
+                    ${combat ? `<div class="ogt-pm-quick">
                         <button class="ogt-btn small" data-ogt-act="pm-hp" data-d="-5">HP −5</button><button class="ogt-btn small" data-ogt-act="pm-hp" data-d="-1">−1</button>
                         <button class="ogt-btn small" data-ogt-act="pm-hp" data-d="1">+1</button><button class="ogt-btn small" data-ogt-act="pm-hp" data-d="5">+5</button>
                         ${p.manaMax ? `<button class="ogt-btn small" data-ogt-act="pm-mana" data-d="-1">${esc(G().terms.mana)} −1</button><button class="ogt-btn small" data-ogt-act="pm-mana" data-d="1">+1</button>` : ''}
                         <button class="ogt-btn small" data-ogt-act="pm-full">Full heal</button></div>` : ''}
                     <div class="ogt-form">
                         ${pf(p, 'name', 'Name', 'text')}${pf(p, 'class', 'Class', 'text')}${pf(p, 'level', 'Level')}
-                        ${combat ? `${pf(p, 'hp', 'HP')}${pf(p, 'hpMax', 'Max HP')}${pf(p, 'mana', G().terms.mana)}${pf(p, 'manaMax', 'Max ' + G().terms.mana.toLowerCase())}${pf(p, 'ac', 'AC')}` : ''}
+                        ${combat ? `${pf(p, 'hp', 'HP')}${pf(p, 'hpMax', 'Max HP')}${pf(p, 'mana', G().terms.mana)}${pf(p, 'manaMax', 'Max ' + G().terms.mana.toLowerCase())}${pf(p, 'baseAc', 'Base AC (no armor)')}` : ''}
                         <label>Skills (name rank, …)<input data-ogt-pfield="skills" type="text" value="${esc(skillText(p))}"></label>
                         ${pf(p, 'note', 'Note', 'text')}
                     </div>
@@ -1153,7 +1256,7 @@ ${SOCIAL_RULES}${G().prompt.socialExtra || ''}${hasCombat(s) ? `
 - When the PLAYER attacks (${G().prompt.attackWho}), stop and request: "check":{"kind":"attack","target":"${G().prompt.enemyExample}","ac":13,"why":"the attack, in a few words"} (${G().prompt.attackSpell}). The game rolls the hit and damage with their real weapon and applies it to that enemy.
 - When an ENEMY attacks the player, stop and request: "check":{"kind":"defend","enemy":"${G().prompt.enemyExample}","atk":4,"dmg":"1d6+1","why":"how it strikes"} (atk +2..+8, dmg by threat). The game rolls against the player's AC and applies the damage to their HP itself — NEVER also report "hp" for combat damage.${settings().trackParty && s.party.length ? ' To aim the enemy at a party member instead, add "target":"<their name>" — the game then rolls against THEIR armor and applies the damage to THEM (never also report their hp for that attack).' : ''}
 - Initiative: the tracker lists a turn order (see "initiative" in the state). Run the fight in that order, one combatant's action at a time — request a player attack only on the player's turn, and make enemies/allies act on theirs. After you narrate, report how many turns passed with "initiative":{"next":N} in the tag (N = turns advanced, 0-6); the game keeps the order and round count. Enemies you add mid-fight join the order automatically.
-- Attacks with no dice: when a PARTY MEMBER attacks an enemy, resolve it yourself (damage roughly 2-10 for a low-level fighter, scaled by class and level) and report it in the tag: "attacks":[{"who":"Mira","target":"${G().prompt.enemyExample}","hit":true,"dmg":6,"crit":false}] — the game subtracts that damage from the enemy's HP and logs it. Do the same for any other enemy attack you narrate without a check (use "hit":false for misses), but for those the damage to the party is applied through "party.update" hp, NOT through "attacks" (which only logs them). Never list the player's own checked attacks here.
+- Attacks with no dice: when a PARTY MEMBER attacks an enemy, resolve it yourself (damage roughly 2-10 for a low-level fighter, scaled by class and level) and report it in the tag: "attacks":[{"who":"Mira","target":"${G().prompt.enemyExample}","hit":true,"dmg":6,"crit":false}] — the game subtracts that damage from the enemy's HP and logs it. If the member has an "equipped" weapon the game rolls its damage itself (your "dmg" is ignored), so just decide hit or miss; a member's AC already includes their equipped armor and shield. Do the same for any other enemy attack you narrate without a check (use "hit":false for misses), but for those the damage to the party is applied through "party.update" hp, NOT through "attacks" (which only logs them). Never list the player's own checked attacks here.
 - The result tells you hit/miss, damage dealt and the enemy's remaining HP. Narrate it exactly; a DEFEATED enemy is dead or out of the fight. Skill checks stay "kind":"skill" (or omit kind). One check per turn, so run a fight one attack at a time.
 - Never invent the player's gear: they carry only what the sheet's "gear" lists. Give loot/purchases with "inv.add" (and "inv.remove" when something is used up), never in prose alone.` : `
 
@@ -1450,7 +1553,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         const nat = d20();
         const bonus = skillBonus(getState(), skill);
         const res = { skill: skill.name, trained: true, bonus, mod: 0, adv: 0, dice: [nat, nat], nat, total: nat + bonus, dc: null, outcome: null };
-        window.toastr?.info(`${skill.name}: d20 ${nat} ${fmtMod(bonus)} = ${res.total}`, '🎲 Roll');
+        notify('info', `${skill.name}: d20 ${nat} ${fmtMod(bonus)} = ${res.total}`, '🎲 Roll');
         const text = rollMessage(res, `${skill.name} (rolled on my own initiative)`);
         const c = ctx();
         const last = c.chat[c.chat.length - 1];
@@ -1738,7 +1841,7 @@ In this game social interaction IS the gameplay, so lean on checks more than usu
         if (cc.bonus) addSkill(s, cc.bonus, presetDescAny(cc.bonus), { base: 1 });
         closeCreator();
         persist({ manual: true });
-        window.toastr?.success(`${s.name} the ${cls.name} is ready.`, APP_NAME);
+        notify('success', `${s.name} the ${cls.name} is ready.`);
     }
 
     function onCreatorClick(e) {
@@ -1796,12 +1899,36 @@ In this game social interaction IS the gameplay, so lean on checks more than usu
         return [i.heal ? `heals ${i.heal}` : '', i.mana ? `${G().terms.mana.toLowerCase()} ${i.mana}` : ''].filter(Boolean).join(' · ');
     }
 
+    /** "Give to…" dropdown for an item: you and every companion except the current holder. */
+    function giveSelect(s, fromBag) {
+        if (!settings().trackParty || !s.party.length) return '';
+        const opts = [fromBag === 'player' ? null : ['player', `${s.name} (you)`], ...s.party.filter((p) => p.id !== fromBag).map((p) => [p.id, p.name])].filter(Boolean);
+        return opts.length ? `<select class="ogt-give-sel" data-ogt-give title="Hand this item over"><option value="">Give to…</option>${opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}</select>` : '';
+    }
+
+    /** One of a companion's carried items (Party tab). */
+    function memberItemHtml(s, p, i) {
+        const usable = (i.type === 'potion' || i.type === 'consumable') && (i.heal || i.mana);
+        const equippable = ['weapon', 'armor', 'shield'].includes(i.type) && hasCombat(s);
+        return `<div class="ogt-item ${i.equipped ? 'eq' : ''}" data-bag="${esc(p.id)}" data-miid="${esc(i.id)}" data-mitype="${esc(i.type)}">
+            <div class="ogt-item-head"><span class="ogt-item-name">${esc(i.name)}${i.qty > 1 ? ` <i>×${i.qty}</i>` : ''}</span>
+                <span class="ogt-quest-btns">
+                    ${equippable ? `<button class="ogt-btn small" data-ogt-act="pm-item-equip">${i.equipped ? 'Unequip' : 'Equip'}</button>` : ''}
+                    ${usable ? `<button class="ogt-btn small" data-ogt-act="pm-item-use">Use</button>` : ''}
+                    ${giveSelect(s, p.id)}
+                    <button class="ogt-btn small" data-ogt-act="pm-item-drop" title="Drop one">✕</button></span></div>
+            <div class="ogt-item-meta"><span class="ogt-badge d-${i.type === 'weapon' ? 'hard' : i.type === 'potion' ? 'easy' : i.type === 'misc' ? 'trivial' : 'medium'}">${esc(i.type)}</span>
+                <span class="ogt-xpchip">${esc(itemBadge(i))}</span></div>
+        </div>`;
+    }
+
     function itemHtml(i) {
         const equippable = ['weapon', 'armor', 'shield'].includes(i.type);
         const usable = i.type === 'potion' || i.type === 'consumable';
-        return `<div class="ogt-item ${i.equipped ? 'eq' : ''}" data-iid="${esc(i.id)}" data-itype="${esc(i.type)}">
+        return `<div class="ogt-item ${i.equipped ? 'eq' : ''}" data-bag="player" data-iid="${esc(i.id)}" data-itype="${esc(i.type)}">
             <div class="ogt-item-head"><span class="ogt-item-name">${esc(i.name)}${i.qty > 1 ? ` <i>×${i.qty}</i>` : ''}</span>
                 <span class="ogt-quest-btns">
+                    ${giveSelect(getState(), 'player')}
                     ${equippable ? `<button class="ogt-btn small" data-ogt-act="item-equip">${i.equipped ? 'Unequip' : 'Equip'}</button>` : ''}
                     ${usable ? `<button class="ogt-btn small" data-ogt-act="item-use">Use</button>` : ''}
                     <button class="ogt-btn small" data-ogt-act="item-drop" title="Drop one">✕</button></span></div>
@@ -1913,6 +2040,8 @@ ${notes.map((t) => '- ' + t).join('\n')}` : '';
             ${chk('trackRel', 'Track NPC relationship scores')}
             ${chk('trackParty', 'Track party members (Party tab)')}
             <label class="ogt-field">Panel side<select data-ogt-setting="panelSide"><option value="left" ${s.panelSide === 'left' ? 'selected' : ''}>Left</option><option value="right" ${s.panelSide === 'right' ? 'selected' : ''}>Right</option></select></label>
+            <div class="ogt-empty">Drag the 🔥 and ☰ buttons anywhere if they cover text.</div>
+            <button class="ogt-btn ogt-wide" data-ogt-act="reset-buttons">Reset button positions</button>
             ${meguminDetected() ? `<div class="ogt-empty">Megumin Suite detected. Let it handle prose, memory, NPC dossiers and images; this panel covers the RPG sheet, quests and relationship scores. If you'd rather use only Megumin's NPC tracking, untick "Track NPC relationship scores".</div>` : ''}
             <label class="ogt-field">Default genre for new characters<select data-ogt-setting="defaultGenre">${Object.values(GENRES).map((g) => `<option value="${g.id}" ${s.defaultGenre === g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select></label>
             <div class="ogt-empty">This chat is set in <b>${esc(G().name)}</b>. To change it, re-open the character creator and pick another genre (it rebuilds your class and gear).</div>
@@ -1985,7 +2114,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             if (last) { last.extra = last.extra || {}; last.extra.ogt_snap = clone(getState()); }
             persist({ manual: true });
             lastStatus = 'Auto-scan applied to last reply.';
-            if (settings().toasts) notes.forEach(([t, m]) => window.toastr?.[t]?.(m, APP_NAME));
+            if (settings().toasts) notes.forEach(([t, m]) => notify(t, m));
             if (!silent) window.toastr?.success('Tracker updated.', APP_NAME);
         } catch (e) {
             console.error(`[${MODULE}] scan failed`, e);
@@ -2019,8 +2148,8 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             case 'del-rel': delete state.rel[relName]; return persist({ manual: true });
             case 'add-rel': {
                 const input = document.getElementById('ogt-new-rel');
-                const n = input.value.trim();
-                if (n && !state.rel[n]) state.rel[n] = { value: 0, note: '' };
+                const n = safeName(input.value);
+                if (n && !Object.hasOwn(state.rel, n)) state.rel[n] = { value: 0, note: '' };
                 input.value = '';
                 return persist({ manual: true });
             }
@@ -2029,8 +2158,44 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             case 'pm-mana': if (!pm) return; pm.mana = clamp(pm.mana + num(target.dataset.d), 0, pm.manaMax); return persist({ manual: true });
             case 'pm-full': if (!pm) return; pm.hp = pm.hpMax; pm.mana = pm.manaMax; return persist({ manual: true });
             case 'pm-del':
-                if (pm && confirm(`Remove ${pm.name} from the party?`)) { state.party = state.party.filter((p) => p !== pm); expandedParty.delete(pm.id); return persist({ manual: true }); }
+                if (pm && confirm(`Remove ${pm.name} from the party?${pm.inv.length ? ' Their gear goes back to your pack.' : ''}`)) {
+                    returnGear(state, pm);
+                    state.party = state.party.filter((p) => p !== pm); expandedParty.delete(pm.id);
+                    return persist({ manual: true });
+                }
                 return;
+            case 'pm-item-use': {
+                const row = target.closest('[data-miid]');
+                const it = pm?.inv.find((x) => x.id === row?.dataset.miid && x.type === row?.dataset.mitype);
+                if (!it) return;
+                const parts = [];
+                if (it.heal) { const b = pm.hp; pm.hp = Math.min(pm.hpMax, pm.hp + rollDice(parseDice(it.heal)).total); parts.push(`restored ${pm.hp - b} HP`); }
+                if (it.mana && pm.manaMax) { const b = pm.mana; pm.mana = Math.min(pm.manaMax, pm.mana + rollDice(parseDice(it.mana)).total); parts.push(`restored ${pm.mana - b} ${G().terms.mana.toLowerCase()}`); }
+                it.qty -= 1;
+                if (it.qty <= 0) pm.inv.splice(pm.inv.indexOf(it), 1);
+                const t = `${pm.name} used ${it.name}${parts.length ? ': ' + parts.join(', ') : ''}.`;
+                pushNote(t); notify('success', t);
+                return persist({ manual: true });
+            }
+            case 'pm-item-equip': {
+                const row = target.closest('[data-miid]');
+                const it = pm?.inv.find((x) => x.id === row?.dataset.miid && x.type === row?.dataset.mitype);
+                if (!it) return;
+                if (it.equipped) it.equipped = false;
+                else { pm.inv.forEach((i) => { if (i.type === it.type) i.equipped = false; }); it.equipped = true; }
+                recalcParty(state);
+                pushNote(`${pm.name} ${it.equipped ? 'equipped' : 'put away'} ${it.name} (AC is now ${pm.ac}).`);
+                return persist({ manual: true });
+            }
+            case 'pm-item-drop': {
+                const row = target.closest('[data-miid]');
+                const it = pm?.inv.find((x) => x.id === row?.dataset.miid && x.type === row?.dataset.mitype);
+                if (!it) return;
+                it.qty -= 1;
+                if (it.qty <= 0) pm.inv.splice(pm.inv.indexOf(it), 1);
+                pushNote(`${pm.name} discarded ${it.name}.`);
+                return persist({ manual: true });
+            }
             case 'add-pm': {
                 const val = (id) => document.getElementById(id)?.value ?? '';
                 const name = val('ogt-pm-name').trim();
@@ -2086,7 +2251,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
                 removeItem(state, name, 1);
                 const text = `${state.name} used ${name}${parts.length ? ': ' + parts.join(', ') : ''} ${hasCombat(state) ? ` (HP ${state.hp}/${state.hpMax}, ${G().terms.mana} ${state.mana}/${state.manaMax})` : ''}.`;
                 pushNote(text);
-                window.toastr?.success(text, APP_NAME);
+                notify('success', text);
                 return persist({ manual: true });
             }
             case 'item-drop': if (item) { removeItem(state, item.name, 1); pushNote(`${state.name} discarded ${item.name}.`); } return persist({ manual: true });
@@ -2139,13 +2304,14 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
                 }
                 return;
             case 'scan': return scanStory();
+            case 'reset-buttons': resetButtonPositions(); return notify('success', 'Floating buttons are back in their default spots.');
             case 'test-full': state.hp = state.hpMax; state.mana = state.manaMax; return persist({ manual: true });
             case 'test-luck': state.luck = state.luckMax; return persist({ manual: true });
-            case 'test-xp': { const n = []; gainXp(state, Math.ceil(100 / Math.max(0.01, num(settings().xpMult, 1))), n); n.forEach(([t, m]) => window.toastr?.[t]?.(m, APP_NAME)); return persist({ manual: true }); }
+            case 'test-xp': { const n = []; gainXp(state, Math.ceil(100 / Math.max(0.01, num(settings().xpMult, 1))), n); n.forEach(([t, m]) => notify(t, m)); return persist({ manual: true }); }
             case 'test-level': {
                 const n = [];
                 gainXp(state, Math.ceil((xpNeeded(state.level) - state.xp) / Math.max(0.01, num(settings().xpMult, 1))), n);
-                n.forEach(([t, m]) => window.toastr?.[t]?.(m, APP_NAME));
+                n.forEach(([t, m]) => notify(t, m));
                 return persist({ manual: true });
             }
             case 'test-gold': state.gold += 1000; return persist({ manual: true });
@@ -2185,11 +2351,13 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             const p = state.party.find((x) => x.id === el.closest('[data-pid]')?.dataset.pid);
             if (!p) return;
             const k = el.dataset.ogtPfield;
+            if (!['skills', 'name', 'class', 'note', 'level', 'hp', 'hpMax', 'mana', 'manaMax', 'baseAc'].includes(k)) return;
             if (k === 'skills') p.skills = parseSkillText(el.value);
             else if (['name', 'class', 'note'].includes(k)) p[k] = el.value.slice(0, k === 'note' ? 120 : 40) || (k === 'name' ? p.name : '');
             else {
                 p[k] = Math.round(num(el.value, p[k]));
-                p.level = clamp(p.level, 1, 20); p.hpMax = clamp(p.hpMax, 1, 500); p.manaMax = clamp(p.manaMax, 0, 200); p.ac = clamp(p.ac, 5, 25);
+                p.level = clamp(p.level, 1, 20); p.hpMax = clamp(p.hpMax, 1, 500); p.manaMax = clamp(p.manaMax, 0, 200); p.baseAc = clamp(p.baseAc, 5, 25);
+                recalcParty(state);
                 p.hp = clamp(p.hp, 0, p.hpMax); p.mana = clamp(p.mana, 0, p.manaMax);
             }
             ctx().chatMetadata.ogt_base = clone(state);
@@ -2219,8 +2387,95 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
 
     function onChange(e) {
         const el = e.target;
+        if (el.dataset.ogtGive !== undefined) { // hand an item to someone else
+            const to = el.value;
+            el.value = '';
+            const row = el.closest('[data-bag]');
+            if (!to || !row) return;
+            const state = getState(), from = row.dataset.bag;
+            const id = row.dataset.miid || row.dataset.iid, type = row.dataset.mitype || row.dataset.itype;
+            const it = bagOf(state, from)?.find((x) => x.id === id && x.type === type);
+            if (!it) return;
+            let qty = 1;
+            if (it.qty > 1) {
+                const a = prompt(`Hand over how many ${it.name}? (1-${it.qty})`, '1');
+                if (a === null) return;
+                qty = clamp(Math.round(num(a, 1)), 1, it.qty);
+            }
+            const r = transferItem(state, { id, type, from, to, qty });
+            if (!r) return notify('warning', 'They cannot carry that (bag full or stack at 99).');
+            pushNote(`${bagName(state, from)} handed ${r.qty > 1 ? r.qty + '× ' : ''}${r.item.name} to ${bagName(state, to)}.`);
+            return persist({ manual: true });
+        }
         if (el.dataset.ogtSetting) { render(); return; }
         if (el.dataset.ogtRelRange || el.dataset.ogtField || el.dataset.ogtStat || el.dataset.ogtPfield) persist({ manual: true });
+    }
+
+    // ───────────────────────── movable floating buttons ─────────────────────────
+    // Drag either floating button anywhere if it covers text. The spot is remembered per device (phone vs desktop) as a
+    // fraction of the screen, so rotating or resizing keeps it on-screen. GM tab → "Reset button positions" undoes it.
+    const FLOAT_BTNS = ['ogt-toggle', 'ogt-menu-btn'];
+    const posKey = (id) => `ogt_pos_${id}_${isMobile() ? 'm' : 'd'}`;
+    const readPos = (id) => {
+        try {
+            const p = JSON.parse(localStorage.getItem(posKey(id)) || 'null');
+            return p && Number.isFinite(p.x) && Number.isFinite(p.y) ? p : null;
+        } catch (e) { return null; /* storage blocked */ }
+    };
+
+    function placeButton(el, left, top) {
+        const w = el.offsetWidth || 44, h = el.offsetHeight || 44;
+        left = clamp(left, 4, Math.max(4, window.innerWidth - w - 4));
+        top = clamp(top, 4, Math.max(4, window.innerHeight - h - 4));
+        Object.assign(el.style, { left: `${left}px`, top: `${top}px`, right: 'auto', bottom: 'auto', transform: 'none' });
+        return { left, top };
+    }
+    function applyButtonPos(el) {
+        const p = readPos(el.id);
+        if (!p) { for (const k of ['left', 'top', 'right', 'bottom', 'transform']) el.style[k] = ''; return; }
+        placeButton(el, p.x * window.innerWidth, p.y * window.innerHeight);
+    }
+    const applyAllButtonPos = () => FLOAT_BTNS.forEach((id) => { const el = document.getElementById(id); if (el) applyButtonPos(el); });
+
+    function makeDraggable(el) {
+        let start = null, moved = false, last = null;
+        el.style.touchAction = 'none'; // so a drag moves the button instead of scrolling the page
+        el.addEventListener('pointerdown', (e) => {
+            if (e.button > 0) return;
+            const r = el.getBoundingClientRect();
+            start = { px: e.clientX, py: e.clientY, left: r.left, top: r.top };
+            moved = false;
+            try { el.setPointerCapture(e.pointerId); } catch (err) { /* not supported */ }
+        });
+        el.addEventListener('pointermove', (e) => {
+            if (!start) return;
+            const dx = e.clientX - start.px, dy = e.clientY - start.py;
+            if (!moved && Math.hypot(dx, dy) < 8) return; // small wobble is still a tap
+            moved = true;
+            el.classList.add('ogt-dragging');
+            last = placeButton(el, start.left + dx, start.top + dy);
+        });
+        const end = (e) => {
+            if (!start) return;
+            try { el.releasePointerCapture(e.pointerId); } catch (err) { /* already released */ }
+            if (moved && last) {
+                try { localStorage.setItem(posKey(el.id), JSON.stringify({ x: last.left / window.innerWidth, y: last.top / window.innerHeight })); } catch (err) { /* storage blocked */ }
+                el.dataset.dragged = '1';
+                setTimeout(() => { delete el.dataset.dragged; }, 80);
+            }
+            start = null; moved = false; last = null;
+            el.classList.remove('ogt-dragging');
+        };
+        el.addEventListener('pointerup', end);
+        el.addEventListener('pointercancel', end);
+        // the click that follows a drag must not toggle the panel / menu (registered first, so it runs before their handlers)
+        el.addEventListener('click', (e) => { if (el.dataset.dragged) { e.stopImmediatePropagation(); e.preventDefault(); } }, true);
+        el.title = `${el.title} — drag to move`;
+    }
+
+    function resetButtonPositions() {
+        for (const id of FLOAT_BTNS) { try { localStorage.removeItem(posKey(id)); } catch (e) { /* storage blocked */ } }
+        applyAllButtonPos();
     }
 
     // ───────────────────────── boot ─────────────────────────
@@ -2268,6 +2523,9 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             chk.target = foe.name; chk.ac = foe.ac;
             scheduleSave(); decorateRolls();
         });
+        FLOAT_BTNS.forEach((id) => makeDraggable(document.getElementById(id)));
+        applyAllButtonPos();
+        window.addEventListener('resize', applyAllButtonPos);
         // top icon row lives behind a button (CSS does the hiding; this just toggles the class)
         const drawerOpen = () => !!document.querySelector('#top-settings-holder .drawer-content.openDrawer');
         document.getElementById('ogt-menu-btn').addEventListener('click', () => document.body.classList.toggle('ogt-menu-open'));
@@ -2279,7 +2537,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
         document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !drawerOpen()) document.body.classList.remove('ogt-menu-open'); });
         document.getElementById('ogt-toggle').addEventListener('click', () => setPanelOpen(!panelOpen()));
         // crossing the phone/desktop breakpoint (rotate, resize) switches to that mode's remembered panel state
-        window.matchMedia('(max-width: 800px)').addEventListener?.('change', render);
+        window.matchMedia('(max-width: 800px)').addEventListener?.('change', () => { applyAllButtonPos(); render(); });
     }
 
     /** A second, always-reachable way to open the panel: an entry in SillyTavern's own ✨ extensions menu (next to the message box). */

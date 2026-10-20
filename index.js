@@ -193,9 +193,74 @@
     /** How an NPC feels about the player nudges social rolls: -4 (hostile) … +4 (devoted). Only applied when the check names the NPC. */
     function socialBonus(s, npc) {
         if (!npc) return 0;
-        const q = slug(npc);
-        const key = Object.keys(s.rel || {}).find((k) => slug(k) === q) || Object.keys(s.rel || {}).find((k) => slug(k).includes(q) || q.includes(slug(k)));
+        const key = findNpc(s, npc).key;
         return key ? clamp(Math.round(s.rel[key].value / 15), -4, 4) : 0;
+    }
+
+    // ── telling NPCs apart: "Miranda" and "Miranda Voss" are one person, "Miranda Cole" is another ──
+    const nameTokens = (n) => slug(n).split('_').filter(Boolean);
+    const hasAlias = (r, name) => (r.aliases || []).some((a) => slug(a) === slug(name));
+    function addAlias(r, name) {
+        const n = safeName(name);
+        if (!n || hasAlias(r, n) || (r.aliases || []).length >= 6) return;
+        r.aliases = (r.aliases || []).concat(n);
+    }
+    /**
+     * Find the tracked NPC a name refers to: exact name or alias first, then a name that starts the same and only adds or drops words
+     * ("Miranda" ↔ "Miranda Voss"). Returns {key}, {key:null}, or {ambiguous:[names]} when several people fit.
+     */
+    function findNpc(s, ref) {
+        const q = slug(ref ?? '');
+        if (!q) return { key: null };
+        const keys = Object.keys(s.rel || {});
+        const exact = keys.find((k) => slug(k) === q) || keys.find((k) => hasAlias(s.rel[k], ref));
+        if (exact) return { key: exact };
+        const qt = nameTokens(ref);
+        const near = keys.filter((k) => {
+            const kt = nameTokens(k);
+            if (!kt.length || kt[0] !== qt[0]) return false;
+            const [short, long] = kt.length <= qt.length ? [kt, qt] : [qt, kt];
+            return short.every((t) => long.includes(t));
+        });
+        if (near.length === 1) return { key: near[0], fuzzy: true };
+        return near.length > 1 ? { key: null, ambiguous: near } : { key: null };
+    }
+    /** Existing entries that look like the same person ("Miranda" + "Miranda Voss"): [shorter, fuller] pairs with exactly one fuller match. */
+    function findDuplicateNpcs(s) {
+        const keys = Object.keys(s.rel || {});
+        const pairs = [];
+        for (const a of keys) {
+            const at = nameTokens(a);
+            const fuller = keys.filter((b) => {
+                const bt = nameTokens(b);
+                return b !== a && bt.length > at.length && bt[0] === at[0] && at.every((t) => bt.includes(t));
+            });
+            if (fuller.length === 1) pairs.push([a, fuller[0]]);
+        }
+        return pairs;
+    }
+
+    /** Rename an NPC (keeping value, note and aliases). If the new name is already tracked, the two are merged. */
+    function renameNpc(s, from, to, notes) {
+        if (!Object.hasOwn(s.rel, from) || from === to) return;
+        const r = s.rel[from];
+        if (Object.hasOwn(s.rel, to)) return mergeNpc(s, from, to, notes);
+        delete s.rel[from];
+        s.rel[to] = r;
+        addAlias(r, from);
+        if (expandedRel?.has(from)) { expandedRel.delete(from); expandedRel.add(to); }
+        notes?.push(['info', `${from} is now tracked as ${to}`]);
+    }
+    /** Fold one NPC into another: the stronger feeling and the longer note win, and the old names become aliases. */
+    function mergeNpc(s, from, into, notes) {
+        if (from === into || !Object.hasOwn(s.rel, from) || !Object.hasOwn(s.rel, into)) return;
+        const a = s.rel[from], b = s.rel[into];
+        if (Math.abs(a.value) > Math.abs(b.value)) b.value = a.value;
+        if (String(a.note || '').length > String(b.note || '').length) b.note = a.note;
+        for (const n of [from, ...(a.aliases || [])]) if (slug(n) !== slug(into)) addAlias(b, n);
+        delete s.rel[from];
+        if (expandedRel?.has(from)) expandedRel.delete(from);
+        notes?.push(['info', `${from} merged into ${into}`]);
     }
     const abilityOf = (sk) => sk.ability || SKILL_ABILITY[sk.id] || null;
     const skillBonus = (s, sk) => sk.rank + (abilityOf(sk) ? amod(s.stats?.[abilityOf(sk)]) : 0);
@@ -446,7 +511,17 @@
     function findMember(s, ref) {
         const q = slug(ref ?? '');
         if (!q) return null;
-        return s.party.find((p) => p.id === q) || s.party.find((p) => p.id.includes(q) || q.includes(p.id)) || null;
+        const exact = s.party.find((p) => p.id === q);
+        if (exact) return exact;
+        // whole-word containment from the first name ("Mira" ↔ "Mira Voss"), never a half-word ("Mira" ≠ "Miranda"); one match only
+        const qt = nameTokens(ref);
+        const near = s.party.filter((p) => {
+            const pt = nameTokens(p.name);
+            if (!pt.length || pt[0] !== qt[0]) return false;
+            const [short, long] = pt.length <= qt.length ? [pt, qt] : [qt, pt];
+            return short.every((t) => long.includes(t));
+        });
+        return near.length === 1 ? near[0] : null;
     }
     function addMember(s, m) {
         if (!m?.name || s.party.length >= PARTY_MAX) return null;
@@ -753,8 +828,25 @@
         if (d.rel && typeof d.rel === 'object') {
             const REL_STEP = 25; // max swing per NPC per reply
             for (const [rawName, v] of Object.entries(d.rel).slice(0, 6)) {
-                const name = safeName(rawName);
-                if (!name) continue;
+                const given = safeName(rawName);
+                if (!given) continue;
+                // is this someone we already track under another form of their name?
+                const hit = findNpc(s, given);
+                if (hit.ambiguous) {
+                    notes.push(['warning', `"${given}" could be ${hit.ambiguous.join(' or ')} — the narrator should use the full name`]);
+                    continue;
+                }
+                let name = given;
+                if (hit.key && hit.key !== given) {
+                    name = hit.key;
+                    if (nameTokens(given).length > nameTokens(hit.key).length) { renameNpc(s, hit.key, given, notes); name = given; } // learned the fuller name
+                    else addAlias(s.rel[hit.key], given);
+                }
+                // an explicit rename ({"rename":"Miranda Voss"}) from the narrator
+                if (v && typeof v === 'object' && v.rename) {
+                    const to = safeName(v.rename);
+                    if (to && to !== name && Object.hasOwn(s.rel, name)) { renameNpc(s, name, to, notes); name = to; }
+                }
                 const r = Object.hasOwn(s.rel, name) ? s.rel[name] : { value: 0, note: '' };
                 const before = tierOf(r.value);
                 if (typeof v === 'number') r.value += clamp(v, -REL_STEP, REL_STEP);
@@ -762,6 +854,7 @@
                     if (v.set !== undefined) r.value = clamp(num(v.set), r.value - REL_STEP, r.value + REL_STEP);
                     if (v.delta) r.value += clamp(num(v.delta), -REL_STEP, REL_STEP);
                     if (v.note) r.note = text(v.note, 120);
+                    if (v.alias) addAlias(r, v.alias);
                 }
                 r.value = clamp(Math.round(r.value), -100, 100);
                 s.rel[name] = r;
@@ -1036,7 +1129,10 @@
             // keep the injected state bounded as a long game accumulates NPCs / notes (most significant relationships first)
             relationships: !settings().trackRel ? undefined : Object.fromEntries(Object.entries(s.rel)
                 .sort((a, b) => Math.abs(b[1].value) - Math.abs(a[1].value)).slice(0, 12)
-                .map(([n, r]) => [n, `${r.value} (${tierOf(r.value)})${r.note ? ' - ' + String(r.note).slice(0, 70) : ''}`])),
+                .map(([n, r]) => [n, `${r.value} (${tierOf(r.value)})${r.aliases?.length ? ` aka ${r.aliases.slice(0, 3).join('/')}` : ''}${r.note ? ' - ' + String(r.note).slice(0, 70) : ''}`])),
+            // NPCs beyond the 12 shown above: names only, so the narrator never "meets" someone it already tracks as a new person
+            other_npcs: !settings().trackRel || Object.keys(s.rel).length <= 12 ? undefined : Object.entries(s.rel)
+                .sort((a, b) => Math.abs(b[1].value) - Math.abs(a[1].value)).slice(12, 42).map(([n]) => n),
             traits: s.traits || undefined,
             backstory: s.backstory ? String(s.backstory).slice(0, 500) : undefined,
             skills: Object.fromEntries((s.skills || []).map((k) => [k.name, `${fmtMod(skillBonus(s, k))} (rank ${k.rank}/${settings().skillMaxRank} ${RANK_NAMES[k.rank] || ''})`])),
@@ -1082,7 +1178,7 @@ ${combat ? ` "enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":
            "complete":["short_id"],"fail":["short_id"]}}
 Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS (hp negative for damage, positive for healing).` : (settings().xpMode === 'quests' ? '' : 'xp is a DELTA.')} ${settings().xpMode === 'quests'
     ? 'Do NOT award xp yourself — the game pays XP automatically when a quest is completed. When a quest begins, pick its "difficulty" honestly relative to the player\'s level (trivial: errand; easy: minor risk; medium: real danger or effort; hard: serious threat; deadly: likely lethal). Add "milestone":true to a quest update only when a major objective step is genuinely finished (max 3 per quest). Put a quest id in "complete" only when its goal is fully achieved.'
-    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes.${settings().trackParty ? ` Party: "party.add" only when a named ally actually joins the player's group for the journey (not passing NPCs; max ${PARTY_MAX} members); give sensible stats for their class and level.${combat ? ' "party.update" hp/mana are DELTAS (negative for damage) — apply them whenever a party member is hurt, healed or spends mana, and resolve their actions yourself, without dice.' : ''} Companions carry their own gear (see "carrying"): when the player hands an item to one (or takes it back, or one gives another something) report "party.transfer" with the item name, from/to ("player" or the member's name) and qty — only items that exist in the giver's bag can move. Loot a companion picks up or items they use up go in that member's "party.update" as "inv":{"add":[…],"remove":["Healing Potion"]}. Use "party.remove" when they leave, die or are lost for good (their gear returns to the player's pack).` : ''} Valid JSON only, on a single line. Keep the whole comment SHORT (under ~300 characters): only changed fields, short ids, and "note"/"progress" text of at most 8 words. Always finish it with the closing }-->.${extra ? '\n' + extra : ''}${diceBlock(s)}${resultBlock()}${notesBlock()}`;
+    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter. Use the EXACT name shown in the tracked list (\"relationships\" / \"other_npcs\") for anyone already there — never start a second entry for the same person. If you learn a fuller name, send {\"Miranda\":{\"rename\":\"Miranda Voss\"}} instead of a new entry; {\"alias\":\"Ms. Voss\"} records another name they go by." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes.${settings().trackParty ? ` Party: "party.add" only when a named ally actually joins the player's group for the journey (not passing NPCs; max ${PARTY_MAX} members); give sensible stats for their class and level.${combat ? ' "party.update" hp/mana are DELTAS (negative for damage) — apply them whenever a party member is hurt, healed or spends mana, and resolve their actions yourself, without dice.' : ''} Companions carry their own gear (see "carrying"): when the player hands an item to one (or takes it back, or one gives another something) report "party.transfer" with the item name, from/to ("player" or the member's name) and qty — only items that exist in the giver's bag can move. Loot a companion picks up or items they use up go in that member's "party.update" as "inv":{"add":[…],"remove":["Healing Potion"]}. Use "party.remove" when they leave, die or are lost for good (their gear returns to the player's pack).` : ''} Valid JSON only, on a single line. Keep the whole comment SHORT (under ~300 characters): only changed fields, short ids, and "note"/"progress" text of at most 8 words. Always finish it with the closing }-->.${extra ? '\n' + extra : ''}${diceBlock(s)}${resultBlock()}${notesBlock()}`;
     }
 
     function refreshPrompt() {
@@ -1271,12 +1367,17 @@ Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp 
                 <div class="ogt-rel-head" data-ogt-act="toggle-rel"><div><div class="ogt-rel-name">${esc(n)}</div>
                 <div class="ogt-rel-tier ${tcls}">${esc(tier)}</div></div><span class="ogt-chev">▾</span></div>
                 ${open ? `<div class="ogt-rel-body">
+                    ${r.aliases?.length ? `<div class="ogt-note">aka ${esc(r.aliases.join(', '))}</div>` : ''}
                     ${r.note ? `<div class="ogt-note">${esc(r.note)}</div>` : ''}
                     <input type="range" min="-100" max="100" value="${r.value}" data-ogt-rel-range="${esc(n)}">
-                    <div class="ogt-rel-foot"><span>${r.value}</span><button class="ogt-btn small" data-ogt-act="del-rel">Remove</button></div>
+                    <div class="ogt-rel-foot"><span>${r.value}</span><span>
+                        ${names.length > 1 ? `<select class="ogt-give-sel" data-ogt-merge title="Same person as another entry? Merge this one into it"><option value="">Merge into…</option>${names.filter((x) => x !== n).map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('')}</select>` : ''}
+                        <button class="ogt-btn small" data-ogt-act="del-rel">Remove</button></span></div>
                 </div>` : ''}
             </div>`;
         }
+        const dups = findDuplicateNpcs(s);
+        if (dups.length) h += `<button class="ogt-btn ogt-wide" data-ogt-act="merge-dups" title="${esc(dups.map(([a, b]) => `${a} → ${b}`).join(', '))}">Merge ${dups.length} likely duplicate${dups.length === 1 ? '' : 's'} (${esc(dups.map(([a, b]) => `${a} → ${b}`).join(', '))})</button>`;
         h += `<div class="ogt-addrow"><input id="ogt-new-rel" placeholder="Add NPC…"><button class="ogt-btn small" data-ogt-act="add-rel">Add</button></div>`;
         return h;
     }
@@ -2605,10 +2706,20 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             case 'toggle-edit': editingChar = !editingChar; return render();
             case 'toggle-rel': expandedRel.has(relName) ? expandedRel.delete(relName) : expandedRel.add(relName); return render();
             case 'del-rel': delete state.rel[relName]; return persist({ manual: true });
+            case 'merge-dups': {
+                const notes = [];
+                for (let guard = 0, pair; guard < 20 && (pair = findDuplicateNpcs(state)[0]); guard++) mergeNpc(state, pair[0], pair[1], notes);
+                notes.forEach(([t, m]) => notify(t, m));
+                if (notes.length) pushNote(`The tracker merged duplicate NPC entries: ${notes.map((n) => n[1]).join('; ')}.`);
+                return persist({ manual: true });
+            }
             case 'add-rel': {
                 const input = document.getElementById('ogt-new-rel');
                 const n = safeName(input.value);
-                if (n && !Object.hasOwn(state.rel, n)) state.rel[n] = { value: 0, note: '' };
+                const hit = n ? findNpc(state, n) : { key: null };
+                if (hit.key) notify('info', `Already tracked as ${hit.key}.`); // don't create a second entry for the same person
+                else if (hit.ambiguous) notify('warning', `"${n}" could be ${hit.ambiguous.join(' or ')} — use the full name.`);
+                else if (n) state.rel[n] = { value: 0, note: '' };
                 input.value = '';
                 return persist({ manual: true });
             }
@@ -2880,6 +2991,17 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
     function onChange(e) {
         const el = e.target;
         if (el.dataset.ogtSel) { actSel[el.dataset.ogtSel] = el.value; return; } // action-bar target / item pickers
+        if (el.dataset.ogtMerge !== undefined) { // fold a duplicate NPC into the right entry
+            const from = el.closest('[data-rel]')?.dataset.rel, into = el.value;
+            el.value = '';
+            if (!from || !into) return;
+            if (!confirm(`Merge "${from}" into "${into}"? They become one entry (the stronger feeling and longer note are kept; "${from}" is remembered as another name).`)) return;
+            const state = getState(), notes = [];
+            mergeNpc(state, from, into, notes);
+            notes.forEach(([t, m]) => notify(t, m));
+            pushNote(`The tracker now treats "${from}" and "${into}" as the same person, "${into}".`);
+            return persist({ manual: true });
+        }
         if (el.dataset.ogtCombat !== undefined) { // per-chat combat on/off
             const state = getState();
             state.combatOff = !el.checked;

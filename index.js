@@ -46,6 +46,7 @@
         defaultGenre: 'fantasy', // pre-selected in the character creator
         trackParty: true,
         allyXp: true, // companions earn the same XP you do and level up
+        smartEnemies: false, // one small raw API call per round lets an AI choose enemy actions (falls back to the built-in AI)
         autoEnemies: false, // the game plays enemy turns itself and tells the narrator the results
         allyControl: true, // you play your companions' turns yourself (action bar); the narrator doesn't decide their attacks
         // testing tools (GM tab → Testing); only take effect while testMode is on
@@ -162,6 +163,11 @@
             if (!Number.isFinite(p.xp)) p.xp = 0;
             if (!['balanced', 'aggressive', 'defensive', 'support'].includes(p.stance)) p.stance = 'balanced';
             if (!['', 'me', 'auto'].includes(p.control)) p.control = ''; // '' = follow the global setting
+            if (!p.tmpl) { // companions added before stats/gear/abilities existed: fill the blanks from their class, once
+                p.tmpl = true;
+                const defaults = JSON.stringify(defaultMemberStats());
+                fillFromClass(o, p, { stats: JSON.stringify(p.stats) === defaults, gear: !p.inv.length, abilities: !p.abilities.length });
+            }
         });
         if (!Array.isArray(o.abilities)) { // casters start with one basic special attack the player can edit
             const special = (GENRES[o.genre] || GENRES.fantasy).terms.special;
@@ -351,6 +357,13 @@
         if (e.atk != null && Number.isFinite(+e.atk)) en.atk = clamp(Math.round(+e.atk), 0, 4 + s.level); // to-hit bonus
         const dd = parseDice(e.dmg, s.level);
         if (dd) en.dmg = diceStr(dd); // damage per hit, e.g. "1d6+1"
+        if (['brute', 'cowardly', 'caster'].includes(e.behavior)) en.behavior = e.behavior;
+        if (e.special && typeof e.special === 'object' && String(e.special.name || '').trim()) { // one notable move: a stronger attack or a self-heal
+            en.special = {
+                name: String(e.special.name).trim().slice(0, 30), kind: e.special.kind === 'heal' ? 'heal' : 'attack',
+                dmg: diceStr(parseDice(e.special.dmg, s.level) || parseDice('1d8')), cd: clamp(Math.round(num(e.special.cd, 2)), 1, 5), ready: 0,
+            };
+        }
         s.enemies.push(en);
         return en;
     }
@@ -416,11 +429,108 @@
         return side.slice().sort((a, b) => a.ref.hp / a.ref.hpMax - b.ref.hp / b.ref.hpMax)[0];
     }
 
+    // ── enemy behaviours and specials. The built-in AI uses them directly; "Smart enemies" lets a small AI call choose among the same options ──
+    let autoPlan = {};            // enemy id → the AI's choice for this round (consumed as each enemy acts)
+    let planning = false;         // true while the small call is in flight: the action bar and roll buttons wait
+    let smartWarned = false;      // only complain once per session that smart enemies are unavailable
+    const specialReady = (s, e) => !!e.special && (s.combat?.round || 0) >= (e.special.ready || 0);
+
+    function ruleEnemyChoice(s, e) {
+        const pct = e.hp / e.hpMax, sp = e.special, ready = specialReady(s, e);
+        if (e.behavior === 'cowardly' && pct < 0.35 && rnd(100) < 60) return { action: 'flee' };
+        if (ready && sp.kind === 'heal' && pct < 0.5) return { action: 'special' };
+        if (ready && sp.kind === 'attack' && (e.behavior === 'caster' || rnd(100) < 40)) return { action: 'special' };
+        return { action: 'attack' };
+    }
+
     function autoEnemyTurn(s, e) {
-        const tgt = pickEnemyTarget(s);
-        if (!tgt) return '';
+        const side = livingSide(s);
+        if (!side.length) return '';
+        // a valid "smart" plan wins; anything off (target gone, special on cooldown, flee while healthy) falls back to the rules
+        const plan = autoPlan[e.id];
+        delete autoPlan[e.id];
+        let choice = ruleEnemyChoice(s, e), tgt = null, line = '';
+        if (plan) {
+            const ok = plan.action === 'attack' || (plan.action === 'special' && specialReady(s, e)) || (plan.action === 'flee' && e.hp / e.hpMax < 0.4);
+            if (ok) { choice = { action: plan.action }; tgt = side.find((x) => slug(x.ref.name) === slug(plan.target)) || null; line = plan.line || ''; }
+        }
+        const flavor = line ? `[${line}] ` : '';
+        const round = s.combat?.round || 0, sp = e.special;
+        if (choice.action === 'flee') { e.defeated = true; e.fled = true; return `${flavor}${e.name} loses its nerve and flees the fight.`; }
+        if (choice.action === 'special' && sp?.kind === 'heal') {
+            const before = e.hp;
+            e.hp = Math.min(e.hpMax, e.hp + rollDice(parseDice(sp.dmg, s.level) || parseDice('1d8')).total);
+            sp.ready = round + (sp.cd || 2);
+            return `${flavor}${e.name} uses ${sp.name} and recovers ${e.hp - before} HP (${e.hp}/${e.hpMax}).`;
+        }
+        tgt = tgt || pickEnemyTarget(s);
         const st = enemyStats(s, e);
-        return resolveDefend({ kind: 'defend', enemy: e.name, atk: st.atk, dmg: st.dmg, target: tgt.member?.name, adv: 0, mod: 0 }, { a: d20(), b: d20() }, s).text;
+        let dmg = st.dmg, label = e.name;
+        if (choice.action === 'special' && sp) { dmg = sp.dmg; label = `${e.name} (${sp.name})`; sp.ready = round + (sp.cd || 2); }
+        return flavor + resolveDefend({ kind: 'defend', enemy: label, atk: st.atk, dmg, target: tgt.member?.name, adv: 0, mod: 0 }, { a: d20(), b: d20() }, s).text;
+    }
+
+    /** Enemies the game will play before control returns to the player side. */
+    function upcomingEnemies(s) {
+        const c = s.combat;
+        if (!c?.order.length) return [];
+        const out = [];
+        for (let i = 0; i < c.order.length; i++) {
+            const o = c.order[(c.turn + i) % c.order.length];
+            if (o.kind === 'player') { if (s.hp > 0) break; }
+            else if (o.kind === 'party') { const p = s.party.find((x) => `p:${x.id}` === o.id); if (p && p.hp > 0 && isPlayed(p)) break; }
+            else { const e = s.enemies.find((x) => `e:${x.id}` === o.id); if (e && !e.defeated) out.push(e); }
+        }
+        return out;
+    }
+
+    /**
+     * "Smart enemies": one small raw call (no chat history) per round asking what each upcoming enemy does. The model only picks from a
+     * fixed menu (attack / special / flee, a living target, a short line); the game still rolls everything and validates the answer.
+     * Any failure leaves autoPlan empty, so the built-in rules play the turns.
+     */
+    async function planEnemyTurns(s) {
+        autoPlan = {};
+        if (!settings().smartEnemies) return;
+        const foes = upcomingEnemies(s);
+        if (!foes.length) return;
+        const gen = ctx().generateRaw;
+        if (typeof gen !== 'function') {
+            if (!smartWarned) { smartWarned = true; notify('warning', 'Smart enemies need a newer SillyTavern (generateRaw). Using the built-in enemy AI.'); }
+            return;
+        }
+        const side = livingSide(s).map((x) => x.ref);
+        const brief = JSON.stringify({
+            round: s.combat.round,
+            playerSide: side.map((x) => ({ name: x.name, hp: `${x.hp}/${x.hpMax}`, ac: x === s ? computeAC(s) : x.ac })),
+            enemies: foes.map((e) => ({
+                id: e.id, name: e.name, hp: `${e.hp}/${e.hpMax}`, behavior: e.behavior || 'balanced',
+                special: e.special ? { name: e.special.name, kind: e.special.kind, ready: specialReady(s, e) } : undefined,
+            })),
+        });
+        const system = 'You decide what enemies do in a turn-based fight. Reply with ONLY a JSON array with one object per enemy: {"id","action","target","line"}. '
+            + 'action is "attack", "special" (only if its special is ready) or "flee" (only if its hp is under 40%). target is exactly one name from playerSide. line is at most 12 words describing the move. No other text.';
+        planning = true;
+        notify('info', 'The enemies are deciding…');
+        try {
+            const raw = await Promise.race([gen(brief, null, false, false, system, 240), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 15000))]);
+            const arr = JSON.parse(String(raw).match(/\[[\s\S]*\]/)?.[0] || '[]');
+            for (const d of arr.slice(0, 8)) {
+                const e = foes.find((x) => x.id === slug(d?.id ?? ''));
+                if (!e) continue;
+                autoPlan[e.id] = {
+                    action: ['attack', 'special', 'flee'].includes(d.action) ? d.action : 'attack',
+                    target: String(d.target ?? '').slice(0, 40),
+                    line: String(d.line ?? '').replace(/[<>\[\]]/g, '').slice(0, 100),
+                };
+            }
+        } catch (err) {
+            console.warn(`[${MODULE}] smart enemies failed, using the built-in AI`, err);
+            autoPlan = {};
+            if (!smartWarned) { smartWarned = true; notify('info', 'Smart enemies are unavailable right now — using the built-in enemy AI.'); }
+        } finally {
+            planning = false;
+        }
     }
 
     const avgDice = (spec, lvl) => { const d = parseDice(spec, lvl); return d ? d.n * (d.sides + 1) / 2 + d.plus : 0; };
@@ -536,10 +646,59 @@
             stats: normMemberStats(m.stats), xp: 0, stance: 'balanced', control: '', focus: '',
         };
         p.abilities = [];
-        for (const it of [].concat(m.inv || []).slice(0, 8)) addToBag(p.inv, it, s.level);
+        p.tmpl = true; // class template applied (or not needed): never auto-fill this member again
+        for (const it of [].concat(m.inv || []).slice(0, 8)) { const added = addToBag(p.inv, it, s.level); if (added && it.eq) tryEquip(p, added); }
         for (const a of [].concat(m.abilities || []).slice(0, ABILITY_MAX)) addAbility(p, a);
         s.party.push(p);
+        // anything the narrator (or the add form) left out is filled from their class, so nobody joins as a blank unarmed 12-everything
+        fillFromClass(s, p, { stats: !m.stats, gear: !p.inv.length, abilities: !p.abilities.length });
         return p;
+    }
+
+    // ── class templates: believable stats, starting gear and abilities for a companion whose class we recognise ──
+    const MEMBER_CLASS_GROUPS = [
+        [/rogue|thief|assassin|burglar|spy/, 'rogue'],
+        [/ranger|hunter|archer|tracker|marksman|scout/, 'ranger'],
+        [/barbarian|fighter|warrior|knight|soldier|guard|mercenary|brawler|gladiator|berserk/, 'warrior'],
+        [/mage|witch|wizard|sorcer|warlock|scholar|alchem|necromancer|conjurer/, 'mage'],
+        [/cleric|clerk|priest|paladin|monk|healer|acolyte|nun|templar|druid/, 'cleric'],
+        [/bard|minstrel|performer|diplomat|singer|jester/, 'bard'],
+    ];
+    const MEMBER_ABILITIES = {
+        mage: [{ name: 'Firebolt', cost: 2, dmg: '2d6' }],
+        cleric: [{ name: 'Healing Word', cost: 2, dmg: '1d8', kind: 'heal' }, { name: 'Smite', cost: 2, dmg: '1d8' }],
+        bard: [{ name: 'Soothing Verse', cost: 2, dmg: '1d6', kind: 'heal' }],
+    };
+    const classGroup = (cls) => MEMBER_CLASS_GROUPS.find(([re]) => re.test(String(cls || '').toLowerCase()))?.[1] || null;
+
+    /** Wear/wield an item (one per slot). Armor and shields are skipped if they would lift the companion's AC by more than 2. */
+    function tryEquip(p, it) {
+        if (!['weapon', 'armor', 'shield'].includes(it.type)) return;
+        if (it.type !== 'weapon') {
+            const armor = it.type === 'armor' ? it : equippedIn(p.inv, 'armor'), shield = it.type === 'shield' ? it : equippedIn(p.inv, 'shield');
+            if ((armor ? armor.ac : p.baseAc) + (shield ? shield.ac : 0) > p.baseAc + 2) return;
+        }
+        p.inv.forEach((i) => { if (i.type === it.type) i.equipped = false; });
+        it.equipped = true;
+    }
+
+    /** Fill in what a companion is missing (stats / gear / abilities) from their class. Returns true if anything changed. */
+    function fillFromClass(s, p, { stats = true, gear = true, abilities = true } = {}) {
+        const group = classGroup(p.class), kit = group && CLASS_KIT[group];
+        if (!group || !kit) return false;
+        let changed = false;
+        if (stats && kit.stats) { p.stats = normMemberStats(kit.stats); changed = true; }
+        if (gear && !p.inv.length) {
+            for (const spec of kit.gear.slice(0, 8)) { const it = addToBag(p.inv, spec, p.level); if (it && spec.eq) tryEquip(p, it); }
+            changed = true;
+        }
+        if (abilities && MEMBER_ABILITIES[group] && !p.abilities.length) {
+            if (!p.manaMax) { p.manaMax = 4 + 2 * p.level; p.mana = p.manaMax; } // casters need something to cast with
+            for (const a of MEMBER_ABILITIES[group]) addAbility(p, a);
+            changed = true;
+        }
+        recalcMember(p);
+        return changed;
     }
 
     // ── abilities: named actions with a mana cost and a damage (or healing) dice, for the player and every companion ──
@@ -602,13 +761,12 @@
     }
     const equippedIn = (bag, type) => bag.find((i) => i.type === type && i.equipped) || null;
     /** A companion's AC comes from what they wear: armor replaces their base AC, a shield adds to it. Call after anything that changes a bag. */
-    function recalcParty(s) {
-        for (const p of s.party) {
-            const armor = equippedIn(p.inv, 'armor'), shield = equippedIn(p.inv, 'shield');
-            if (!Number.isFinite(p.baseAc)) p.baseAc = p.ac;
-            p.ac = clamp((armor ? armor.ac : p.baseAc) + (shield ? shield.ac : 0), 5, 25);
-        }
+    function recalcMember(p) {
+        const armor = equippedIn(p.inv, 'armor'), shield = equippedIn(p.inv, 'shield');
+        if (!Number.isFinite(p.baseAc)) p.baseAc = p.ac;
+        p.ac = clamp((armor ? armor.ac : p.baseAc) + (shield ? shield.ac : 0), 5, 25);
     }
+    function recalcParty(s) { for (const p of s.party) recalcMember(p); }
 
     /** A companion leaves: whatever they carried goes into the player's pack. Returns how many stacks moved. */
     function returnGear(s, p) {
@@ -701,7 +859,7 @@
         for (let i = end - 1; i >= 0; i--) if (c.chat[i].extra?.ogt_snap) { at = i; break; }
         md.ogt = at >= 0 ? clone(c.chat[at].extra.ogt_snap) : clone(md.ogt_base || defaultState());
         refreshPrompt();
-        render();
+        render(true); // the chat changed under the panel: always redraw, even if a box in the panel has focus
     }
 
     // ───────────────────────── applying model updates ─────────────────────────
@@ -876,6 +1034,7 @@
                 if (combat && u.hp) p.hp = clamp(p.hp + clamp(num(u.hp), -p.hpMax, p.hpMax), 0, p.hpMax);
                 if (combat && u.mana) p.mana = clamp(p.mana + clamp(num(u.mana), -p.manaMax, p.manaMax), 0, p.manaMax);
                 if (u.level) p.level = clamp(Math.round(num(u.level, p.level)), 1, 20);
+                if (u.stats && typeof u.stats === 'object') p.stats = normMemberStats({ ...p.stats, ...u.stats });
                 if (u.class) p.class = text(u.class, 30);
                 if (u.note !== undefined) p.note = text(u.note, 120);
                 for (const k of normSkills(u.skills)) {
@@ -889,6 +1048,7 @@
                 if (u.inv && typeof u.inv === 'object') { // loot picked up / things used up by this companion
                     for (const it of [].concat(u.inv.add || []).slice(0, 3)) {
                         const added = addToBag(p.inv, it, s.level);
+                        if (added && it?.eq) tryEquip(p, added);
                         if (added) notes.push(['info', `${p.name} gained: ${added.name}`]);
                     }
                     for (const it of [].concat(u.inv.remove || []).slice(0, 3)) {
@@ -1173,12 +1333,12 @@ Schema (omit anything unchanged; use {} content only if nothing changed — or o
 {${combat ? '"hp":-3,"mana":-1,' : ''}${settings().xpMode === 'quests' ? '' : '"xp":5,'}"class":"${G().prompt.classExample}",
  "scene":{${G().prompt.sceneExample}},
 ${settings().trackRel ? ` "rel":{"${G().prompt.npcExample}":{"delta":5,"note":"short reason / how they feel"}},\n` : ''}${settings().modelUnlockSkills ? ' "skills":{"unlock":[{"name":"Lockpicking","desc":"one line"}]},\n' : ''} "inv":${G().prompt.invExample},
-${combat ? ` "enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":13,"atk":4,"dmg":"1d6+1"}],"clear":true},\n` : ''}${settings().trackParty ? ` "party":{"add":[{"name":"Mira","class":"Rogue","level":2${combat ? ',"hp":22,"mana":0,"ac":13' : ''},"stats":{"dex":15,"cha":12},"skills":[["Stealth",3]]}],"update":[{"name":"Mira"${combat ? ',"hp":-4' : ''},"note":"short"}],"transfer":[{"item":"Healing Potion","from":"player","to":"Mira","qty":1}],"remove":["Mira"]},\n` : ''} "quests":{"add":[{"id":"short_id","title":"Quest title","desc":"one line objective","difficulty":"trivial|easy|medium|hard|deadly"}],
+${combat ? ` "enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":13,"atk":4,"dmg":"1d6+1"}],"clear":true},\n` : ''}${settings().trackParty ? ` "party":{"add":[{"name":"Mira","class":"Rogue","level":2${combat ? ',"hp":22,"mana":0,"ac":13' : ''},"stats":{"dex":15,"cha":12},"skills":[["Stealth",3]]${combat ? ',"inv":[{"name":"Dagger","type":"weapon","dmg":"1d4","ability":"dex","eq":1}],"abilities":[{"name":"Sneak Attack","cost":1,"dmg":"2d6"}]' : ''}}],"update":[{"name":"Mira"${combat ? ',"hp":-4' : ''},"note":"short"}],"transfer":[{"item":"Healing Potion","from":"player","to":"Mira","qty":1}],"remove":["Mira"]},\n` : ''} "quests":{"add":[{"id":"short_id","title":"Quest title","desc":"one line objective","difficulty":"trivial|easy|medium|hard|deadly"}],
            "update":[{"id":"short_id","progress":"what's done / what's next","milestone":true}],
            "complete":["short_id"],"fail":["short_id"]}}
 Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS (hp negative for damage, positive for healing).` : (settings().xpMode === 'quests' ? '' : 'xp is a DELTA.')} ${settings().xpMode === 'quests'
     ? 'Do NOT award xp yourself — the game pays XP automatically when a quest is completed. When a quest begins, pick its "difficulty" honestly relative to the player\'s level (trivial: errand; easy: minor risk; medium: real danger or effort; hard: serious threat; deadly: likely lethal). Add "milestone":true to a quest update only when a major objective step is genuinely finished (max 3 per quest). Put a quest id in "complete" only when its goal is fully achieved.'
-    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter. Use the EXACT name shown in the tracked list (\"relationships\" / \"other_npcs\") for anyone already there — never start a second entry for the same person. If you learn a fuller name, send {\"Miranda\":{\"rename\":\"Miranda Voss\"}} instead of a new entry; {\"alias\":\"Ms. Voss\"} records another name they go by." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes.${settings().trackParty ? ` Party: "party.add" only when a named ally actually joins the player's group for the journey (not passing NPCs; max ${PARTY_MAX} members); give sensible stats for their class and level.${combat ? ' "party.update" hp/mana are DELTAS (negative for damage) — apply them whenever a party member is hurt, healed or spends mana, and resolve their actions yourself, without dice.' : ''} Companions carry their own gear (see "carrying"): when the player hands an item to one (or takes it back, or one gives another something) report "party.transfer" with the item name, from/to ("player" or the member's name) and qty — only items that exist in the giver's bag can move. Loot a companion picks up or items they use up go in that member's "party.update" as "inv":{"add":[…],"remove":["Healing Potion"]}. Use "party.remove" when they leave, die or are lost for good (their gear returns to the player's pack).` : ''} Valid JSON only, on a single line. Keep the whole comment SHORT (under ~300 characters): only changed fields, short ids, and "note"/"progress" text of at most 8 words. Always finish it with the closing }-->.${extra ? '\n' + extra : ''}${diceBlock(s)}${resultBlock()}${notesBlock()}`;
+    : 'Award xp (roughly 3–10) only for meaningful achievements; quest completion is paid automatically from the quest\'s difficulty.'}${settings().trackRel ? " Relationship delta is usually -15..+15 on a -100..100 scale; use it whenever an NPC's feelings toward the player change, and add new NPCs the first time they matter. Use the EXACT name shown in the tracked list (\"relationships\" / \"other_npcs\") for anyone already there — never start a second entry for the same person. If you learn a fuller name, send {\"Miranda\":{\"rename\":\"Miranda Voss\"}} instead of a new entry; {\"alias\":\"Ms. Voss\"} records another name they go by." : ''}${settings().modelUnlockSkills ? ' Use "skills.unlock" only when the player actually learns a brand-new skill through in-story training or discovery (at most one per turn; never for skills they already have).' : ''} Always keep "scene" current when location or time of day changes.${settings().trackParty ? ` Party: "party.add" only when a named ally actually joins the player's group for the journey (not passing NPCs; max ${PARTY_MAX} members); give each new companion ability scores ("stats"), skills${combat ? ', starting gear ("inv": weapons/armor with "eq":1 for what they wield or wear) and, for casters and specialists, "abilities" (name, mana cost, damage dice; "kind":"heal" for healing)' : ''} that fit their class and level — whatever you leave out is filled in from their class, and you can fix an existing companion later with "party.update" ("stats", "abilities", "inv").${combat ? ' "party.update" hp/mana are DELTAS (negative for damage) — apply them whenever a party member is hurt, healed or spends mana. Companions\' combat actions are never yours to decide — the game or the player plays them.' : ''} Companions carry their own gear (see "carrying"): when the player hands an item to one (or takes it back, or one gives another something) report "party.transfer" with the item name, from/to ("player" or the member's name) and qty — only items that exist in the giver's bag can move. Loot a companion picks up or items they use up go in that member's "party.update" as "inv":{"add":[…],"remove":["Healing Potion"]}. Use "party.remove" when they leave, die or are lost for good (their gear returns to the player's pack).` : ''} Valid JSON only, on a single line. Keep the whole comment SHORT (under ~300 characters): only changed fields, short ids, and "note"/"progress" text of at most 8 words. Always finish it with the closing }-->.${extra ? '\n' + extra : ''}${diceBlock(s)}${resultBlock()}${notesBlock()}`;
     }
 
     function refreshPrompt() {
@@ -1240,7 +1400,7 @@ Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp 
             h += `<div class="ogt-section">COMBAT</div>${initiativeHtml(s)}${actionBarHtml(s)}${s.enemies.map((e) => `<div class="ogt-foe ${e.defeated ? 'dead' : ''}" data-eid="${esc(e.id)}">
                 <div class="ogt-foe-head"><span>${esc(e.name)}</span><span>AC ${e.ac}</span></div>
                 <div class="ogt-bar"><div class="ogt-fill hp" style="width:${clamp((e.hp / e.hpMax) * 100, 0, 100)}%"></div></div>
-                <div class="ogt-foe-foot"><span>${e.defeated ? 'Defeated' : `${e.hp}/${e.hpMax} HP · ${(() => { const st = enemyStats(s, e); return `${fmtMod(st.atk)} to hit · ${esc(st.dmg)}`; })()}`}</span><button class="ogt-btn small" data-ogt-act="foe-del" title="Remove">✕</button></div></div>`).join('')}
+                <div class="ogt-foe-foot"><span>${e.defeated ? (e.fled ? 'Fled' : 'Defeated') : `${e.hp}/${e.hpMax} HP · ${(() => { const st = enemyStats(s, e); return `${fmtMod(st.atk)} to hit · ${esc(st.dmg)}`; })()}${e.special ? ` · ✦ ${esc(e.special.name)}${specialReady(s, e) ? '' : ' (recharging)'}` : ''}${e.behavior ? ` · ${esc(e.behavior)}` : ''}`}</span><button class="ogt-btn small" data-ogt-act="foe-del" title="Remove">✕</button></div></div>`).join('')}
                 ${foes.length ? '' : '<div class="ogt-empty">All enemies defeated.</div>'}
                 <button class="ogt-btn ogt-wide" data-ogt-act="foes-clear">End combat</button>${attackLogHtml(s)}`;
         }
@@ -1422,7 +1582,7 @@ Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp 
                         <label>Focus target<select data-ogt-pfield="focus"><option value="">Weakest enemy</option>
                             ${s.enemies.filter((e) => !e.defeated).map((e) => `<option value="${esc(e.id)}" ${p.focus === e.id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}</select></label>
                     </div>` : ''}
-                    <div class="ogt-rel-foot"><span></span><button class="ogt-btn small danger" data-ogt-act="pm-del">Remove from party</button></div>` : ''}
+                    <div class="ogt-rel-foot"><button class="ogt-btn small" data-ogt-act="pm-template" title="Fill any missing stats, gear and abilities from their class">Fill from class</button><button class="ogt-btn small danger" data-ogt-act="pm-del">Remove from party</button></div>` : ''}
                 </div>
             </div>`;
         }
@@ -1639,8 +1799,8 @@ The check must live ONLY inside that hidden <!--OGT:…--> comment. Never write 
 ${SOCIAL_RULES}${G().prompt.socialExtra || ''}${hasCombat(s) ? `
 
 [Combat — the game resolves every attack and tracks enemy HP]
-- Register each enemy the moment it appears, with sensible stats: <!--OGT:{"enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":13,"atk":4,"dmg":"1d6+1"}]}}--> ("atk" = its to-hit bonus +2..+8, "dmg" = damage dice per hit, scaled to its threat — the game uses them to play its turns).${settings().autoEnemies ? ' ENEMY TURNS ARE AUTOMATIC: the game rolls every enemy attack itself and sends you the results as "TURNS RESOLVED BY THE GAME: …" lines inside a [ROLL] result. Narrate exactly those results; NEVER request "defend" checks, invent enemy attacks or damage, or report "initiative.next" (the game advances the turns itself).' : ''} Typical AC: ${G().prompt.acGuide}. Use "enemies":{"clear":true} when the fight ends.
-- When the PLAYER attacks (${G().prompt.attackWho}), stop and request: "check":{"kind":"attack","target":"${G().prompt.enemyExample}","ac":13,"why":"the attack, in a few words"} (${G().prompt.attackSpell}). The game rolls the hit and damage with their real weapon and applies it to that enemy.
+- Register each enemy the moment it appears, with sensible stats: <!--OGT:{"enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":13,"atk":4,"dmg":"1d6+1"}]}}--> ("atk" = its to-hit bonus +2..+8, "dmg" = damage dice per hit, scaled to its threat — the game uses them to play its turns; for a notable enemy you may also add "behavior":"brute|cowardly|caster" and ONE "special":{"name":"Bone Spear","kind":"attack|heal","dmg":"2d6","cd":2} where cd = rounds between uses).${settings().autoEnemies ? ' ENEMY TURNS ARE AUTOMATIC: the game rolls every enemy attack itself and sends you the results as "TURNS RESOLVED BY THE GAME: …" lines inside a [ROLL] result. Narrate exactly those results; NEVER request "defend" checks, invent enemy attacks or damage, or report "initiative.next" (the game advances the turns itself).' : ''} Typical AC: ${G().prompt.acGuide}. Use "enemies":{"clear":true} when the fight ends.
+- The PLAYER (${G().prompt.attackWho}) and any companion they control attack through the game's ACTION BAR, never through a check — do NOT request "kind":"attack" checks. When a fight starts, register every enemy (above), describe the opening moment and STOP: the game rolls initiative and the player picks their action. Never resolve, summarise or fast-forward a fight in prose: narrate only the single result or the one enemy turn you were given, then hand the turn back with a short "what do you do?" line. The game owns enemy HP — never kill, wound, remove or clear an enemy yourself unless the fight genuinely ends by surrender or escape. If a named NPC fights beside the player, register them with "party.add" so the game tracks their turns and HP; remove them when the fight is over.
 - When an ENEMY attacks the player, stop and request: "check":{"kind":"defend","enemy":"${G().prompt.enemyExample}","atk":4,"dmg":"1d6+1","why":"how it strikes"} (atk +2..+8, dmg by threat). The game rolls against the player's AC and applies the damage to their HP itself — NEVER also report "hp" for combat damage.${settings().trackParty && s.party.length ? ' To aim the enemy at a party member instead, add "target":"<their name>" — the game then rolls against THEIR armor and applies the damage to THEM (never also report their hp for that attack).' : ''}
 - Initiative: the tracker lists a turn order (see "initiative" in the state). Run the fight in that order, one combatant's action at a time — the PLAYER plays their own turn, and any companion with "control":"player", through the game's action bar. Companions with "control":"game"${settings().autoEnemies ? ' and all enemies' : ''} are played by the game and reported to you as "TURNS RESOLVED BY THE GAME" lines. You narrate ${settings().autoEnemies ? 'what those results say and the outcomes you receive' : 'ENEMY turns and the outcomes you receive'}; never invent an attack or action for the player or a companion, and stop when a player-controlled turn comes up. After you narrate, report how many turns passed with "initiative":{"next":N} in the tag (N = turns advanced, 0-6); the game keeps the order and round count. Enemies you add mid-fight join the order automatically.
 - Attacks with no check: an enemy attack you narrate without a "defend" check can be logged with "attacks":[{"who":"<enemy name>","target":"<who it hit>","hit":true,"dmg":N}] — log only; apply the damage to a party member through "party.update" hp. The player and every companion resolve their own attacks through the game (you play neither), so never report those.
@@ -1859,6 +2019,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (!chk || id !== c.chat.length - 1) return null;
         if (wantPending ? chk.accepted !== false : !!chk.result) return null;
         if (isGenerating()) { window.toastr?.info('Wait for the reply to finish first.', APP_NAME); return null; }
+        if (planning) { window.toastr?.info('The enemies are still deciding…', APP_NAME); return null; }
         return chk;
     }
     async function spinDie(btn, label) {
@@ -1893,16 +2054,16 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (!offer) delete chk.pre;
         if (isCombat(chk)) persist({ manual: true }); else scheduleSave();
         decorateRolls();
-        if (!offer) { endActionTurn(chk); deliverRoll(finalMsg(chk)); }
+        if (!offer) { await endActionTurn(chk); deliverRoll(finalMsg(chk)); }
     }
 
     /** A check created from the action bar ends that combatant's turn once its result is final (accepted or out of rerolls). */
-    function endActionTurn(chk) {
+    async function endActionTurn(chk) {
         if (!chk.turn || chk.turnDone) return;
         chk.turnDone = true;
-        const s = getState();
-        nextTurn(s);
-        chk.after = autoTurnsText(s, { enemies: !!settings().autoEnemies }) || undefined; // turns the game played next, told to the narrator with this result
+        nextTurn(getState());
+        if (settings().autoEnemies) await planEnemyTurns(getState());
+        chk.after = autoTurnsText(getState(), { enemies: !!settings().autoEnemies }) || undefined; // turns the game played next, told to the narrator with this result
         persist({ manual: true });
     }
     const finalMsg = (chk) => rollMessage(chk.result, checkLabel(chk.result, chk)) + (chk.after ? ` ${chk.after}` : '');
@@ -1931,7 +2092,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (!again) delete chk.pre;
         persist({ manual: true });
         decorateRolls();
-        if (!again) { endActionTurn(chk); deliverRoll(finalMsg(chk)); }
+        if (!again) { await endActionTurn(chk); deliverRoll(finalMsg(chk)); }
     }
 
     /** Spend 1 Luck before rolling: advantage on your own check/attack (cancels disadvantage), or disadvantage on an enemy's attack. */
@@ -1954,14 +2115,14 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         decorateRolls();
     }
 
-    function doAccept(btn) {
+    async function doAccept(btn) {
         if (rolling) return;
         const chk = locateCheck(btn, true);
         if (!chk) return;
         chk.accepted = true; delete chk.pre;
         scheduleSave();
         decorateRolls();
-        endActionTurn(chk);
+        await endActionTurn(chk);
         deliverRoll(finalMsg(chk));
     }
 
@@ -2005,6 +2166,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         const s = getState(), h = turnHolder(s);
         if (!h) { notify('info', "It isn't a turn you control."); return null; }
         if (isGenerating()) { notify('info', 'Wait for the reply to finish first.'); return null; }
+        if (planning) { notify('info', 'The enemies are still deciding…'); return null; }
         return { s, h };
     }
 
@@ -2020,7 +2182,11 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         const last = ctx().chat[ctx().chat.length - 1];
         if (!last) return notify('warning', 'Send a message first.');
         const open = last.extra?.ogt_check;
-        if (open && (!open.result || open.accepted === false)) return notify('info', 'Finish the roll that is already waiting first.');
+        if (open && (!open.result || open.accepted === false)) {
+            // a roll the narrator asked for must not lock the action bar: an unrolled attack request is simply replaced
+            if (open.turn || open.result || (open.kind !== 'attack' && open.kind !== 'defend')) return notify('info', 'Finish the roll that is already waiting first.');
+            notify('info', 'Replaced the narrator\'s pending attack with your chosen action.');
+        }
         const st = attackStats(s, h.id, !!ability, ability?.dmg, ability?.name);
         last.extra = last.extra || {};
         delete last.extra.ogt_roll;
@@ -2033,9 +2199,10 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
     }
 
     /** An action with no roll card: record it, pass the turn, and tell the narrator what happened. */
-    function finishAction(text) {
+    async function finishAction(text) {
+        nextTurn(getState());
+        if (settings().autoEnemies) await planEnemyTurns(getState()); // smart enemies decide first (no-op when off)
         const s = getState();
-        nextTurn(s);
         sendGameText(s, text, autoTurnsText(s, { enemies: !!settings().autoEnemies })); // game-played allies (and enemies, if auto-play is on) go now
     }
 
@@ -2049,8 +2216,10 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
     }
 
     /** "Run enemy turns" button: let the game play the turns until it is yours again. */
-    function runTurnsNow() {
+    async function runTurnsNow() {
         if (isGenerating()) return notify('info', 'Wait for the reply to finish first.');
+        if (planning) return;
+        await planEnemyTurns(getState());
         const s = getState();
         const t = autoTurnsText(s);
         if (!t) return notify('info', 'No automatic turns to play right now.');
@@ -2597,6 +2766,7 @@ ${notes.map((t) => '- ' + t).join('\n')}` : '';
             ${genreOf(getState()).combat === false ? '' : `<label class="ogt-check"><input type="checkbox" data-ogt-combat ${getState().combatOff ? '' : 'checked'}> Combat system for this chat (HP, armor, enemies, initiative, attacks). Turn off for roleplay-only sessions.</label>`}
             ${chk('trackParty', 'Track party members (Party tab)')}
             ${chk('autoEnemies', 'Auto-play enemy turns (and allies\' if you don\'t control them): the game rolls them and sends one summary to the narrator')}
+            ${chk('smartEnemies', 'Smart enemies: for each round of automatic enemy turns, ask the AI what they do with one tiny call (no chat history; the game still rolls everything). Falls back to the built-in AI if the call fails.')}
             ${chk('allyControl', 'Companions\' combat turns are mine by default (action bar). Off: the game plays them with their tactics. Each ally can override this.')}
             ${chk('allyXp', 'Companions earn the same XP I do and level up')}
             <label class="ogt-field">Panel side<select data-ogt-setting="panelSide"><option value="left" ${s.panelSide === 'left' ? 'selected' : ''}>Left</option><option value="right" ${s.panelSide === 'right' ? 'selected' : ''}>Right</option></select></label>
@@ -2623,7 +2793,7 @@ ${notes.map((t) => '- ' + t).join('\n')}` : '';
             <div class="ogt-empty">State is saved per chat and snapshotted on every reply, so swipes and deletes roll it back correctly.</div>`;
     }
 
-    function render() {
+    function render(force = false) {
         const panel = document.getElementById('ogt-panel');
         if (!panel) return;
         const s = settings();
@@ -2645,7 +2815,8 @@ ${notes.map((t) => '- ' + t).join('\n')}` : '';
             else if (r > tabsEl.scrollLeft + tabsEl.clientWidth) tabsEl.scrollLeft = r - tabsEl.clientWidth + 6;
         }
         const active = document.activeElement;
-        if (active && panel.contains(active) && /INPUT|TEXTAREA/.test(active.tagName) && active.type !== 'range' && active.type !== 'checkbox') return; // don't clobber typing
+        if (!force && active && panel.contains(active) && /INPUT|TEXTAREA/.test(active.tagName) && active.type !== 'range' && active.type !== 'checkbox') return; // don't clobber typing
+        if (force && active && panel.contains(active)) active.blur();
         const body = panel.querySelector('.ogt-body');
         const scroll = body.scrollTop;
         body.innerHTML = activeTab === 'character' ? renderCharacter(state) : activeTab === 'quests' ? renderQuests(state) : activeTab === 'party' && settings().trackParty ? renderParty(state) : activeTab === 'skills' ? renderSkills(state) : activeTab === 'gear' ? renderGear(state) : renderGM();
@@ -2724,6 +2895,14 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
                 return persist({ manual: true });
             }
             case 'toggle-pm': if (!pm) return; expandedParty.has(pm.id) ? expandedParty.delete(pm.id) : expandedParty.add(pm.id); return render();
+            case 'pm-template': {
+                if (!pm) return;
+                const unset = JSON.stringify(pm.stats) === JSON.stringify(defaultMemberStats());
+                if (!classGroup(pm.class)) return notify('info', `No class template for "${pm.class}". Set their stats, gear and abilities by hand, or rename the class (e.g. Rogue, Cleric, Mage…).`);
+                const did = fillFromClass(state, pm, { stats: unset, gear: !pm.inv.length, abilities: !pm.abilities.length });
+                notify(did ? 'success' : 'info', did ? `${pm.name}: filled in from class.` : `${pm.name} already has stats, gear and abilities.`);
+                return persist({ manual: true });
+            }
             case 'pm-hp': if (!pm) return; pm.hp = clamp(pm.hp + num(target.dataset.d), 0, pm.hpMax); return persist({ manual: true });
             case 'pm-mana': if (!pm) return; pm.mana = clamp(pm.mana + num(target.dataset.d), 0, pm.manaMax); return persist({ manual: true });
             case 'pm-full': if (!pm) return; pm.hp = pm.hpMax; pm.mana = pm.manaMax; return persist({ manual: true });
@@ -3196,7 +3375,10 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
         document.head.appendChild(l);
     }
 
+    let booted = false;
     function init() {
+        if (booted) return; // APP_READY and the late-load path can both fire; a second init would double every handler
+        booted = true;
         settings();
         loadFonts();
         buildUI();

@@ -88,7 +88,9 @@ The game tracks enemy HP, rolls attacks and damage, and applies results; the nar
 in every genre except Slice of Life, unless you switch it off for the chat.
 
 **Enemies.** The narrator registers each enemy with HP, AC, a to-hit bonus and a damage die. Enemies without stats get
-level-based defaults. Enemy cards show HP and "+N to hit · damage".
+level-based defaults. Enemy cards show HP and "+N to hit · damage". Notable enemies can also have a **behavior**
+(*brute*, *cowardly* — flees when badly hurt, *caster* — favors its special) and one **special** (a stronger attack or a
+self-heal with a cooldown in rounds; the card shows "recharging" between uses).
 
 **Initiative.** When a live enemy exists, everyone rolls initiative (d20 + DEX modifier; enemies get a small bonus from their AC) and the **Initiative** list shows
 the order, the current turn and the round. *Next turn ›* advances by hand; 🎲 rerolls initiative. Combatants who go down
@@ -117,6 +119,14 @@ rolls against *their* AC and applies the damage to them.
 attacking the most wounded target most of the time, and sends the narrator **one summary** instead of one request per
 attack. Companions you do not control are played by the game too (see Tactics below). If auto-play is off, press
 **▶ Run turns** whenever it is a game-played turn to run them on demand.
+
+**Smart enemies (optional, off by default).** With *Smart enemies* on, each round of automatic enemy turns starts with one
+tiny API call that has **no chat history**: just the round, who is on each side, and each enemy's HP, behavior and whether its
+special is ready (a few hundred tokens). The AI answers with a short JSON choice per enemy — attack, special or flee, a
+target, and a one-line description — which appears in the summary the narrator receives. It can only choose from that menu:
+the game still rolls every hit and damage, ignores impossible choices (a dead target, a special on cooldown, fleeing while
+healthy) and falls back to the built-in enemy AI if the call fails or times out (15 s). Needs a SillyTavern version that
+exposes `generateRaw`.
 
 **Abilities** are named actions with a mana cost and a dice expression (e.g. *Fireball, 3 mana, 2d6* or *Mend, 2 mana,
 heals 1d8*). Add them under *Edit character → Abilities* (yours) or in a companion's open card. Casters start with one
@@ -175,6 +185,7 @@ The tracker keeps **one entry per person**:
 | **Combat system for this chat** | Per chat. Off = roleplay-only: no HP, enemies, initiative or attacks. |
 | Track party members | Enables the Party tab and companion rules. |
 | **Auto-play enemy turns** | The game rolls enemy (and game-played ally) turns and sends one summary. |
+| **Smart enemies** | Each round of enemy turns, one tiny no-history API call picks their actions; falls back to the built-in AI. |
 | Companions' turns are mine by default | On = action bar; off = the game plays them. Each ally can override this. |
 | Companions earn XP | Allies share your XP and level up. |
 | Panel side · Reset button positions | Where the panel sits; undo dragged buttons. |

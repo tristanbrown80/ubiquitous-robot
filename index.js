@@ -45,6 +45,9 @@
         luckRerolls: true,
         defaultGenre: 'fantasy', // pre-selected in the character creator
         trackParty: true,
+        allyXp: true, // companions earn the same XP you do and level up
+        autoEnemies: false, // the game plays enemy turns itself and tells the narrator the results
+        allyControl: true, // you play your companions' turns yourself (action bar); the narrator doesn't decide their attacks
         // testing tools (GM tab → Testing); only take effect while testMode is on
         testMode: false,
         testInfiniteLuck: false,
@@ -151,7 +154,19 @@
         if (!Array.isArray(o.enemies)) o.enemies = [];
         if (!Array.isArray(o.party)) o.party = [];
         if (!Array.isArray(o.log)) o.log = [];
-        o.party.forEach((p) => { if (!Array.isArray(p.inv)) p.inv = []; if (!Number.isFinite(p.baseAc)) p.baseAc = p.ac; });
+        o.party.forEach((p) => {
+            if (!Array.isArray(p.inv)) p.inv = [];
+            if (!Array.isArray(p.abilities)) p.abilities = [];
+            if (!Number.isFinite(p.baseAc)) p.baseAc = p.ac;
+            if (!p.stats || typeof p.stats !== 'object') p.stats = defaultMemberStats();
+            if (!Number.isFinite(p.xp)) p.xp = 0;
+            if (!['balanced', 'aggressive', 'defensive', 'support'].includes(p.stance)) p.stance = 'balanced';
+            if (!['', 'me', 'auto'].includes(p.control)) p.control = ''; // '' = follow the global setting
+        });
+        if (!Array.isArray(o.abilities)) { // casters start with one basic special attack the player can edit
+            const special = (GENRES[o.genre] || GENRES.fantasy).terms.special;
+            o.abilities = o.manaMax > 0 ? [normAbility({ name: special[0].toUpperCase() + special.slice(1), cost: 1, dmg: '1d8' }, o.level)] : [];
+        }
         if (!Number.isFinite(o.luckMax)) o.luckMax = 3;
         if (!Number.isFinite(o.luck)) o.luck = 1;
         if (!o.genre) o.genre = 'fantasy'; // chats from before genres were fantasy
@@ -268,6 +283,9 @@
         while (s.enemies.some((x) => x.name === name && !x.defeated)) name = `${String(e.name).slice(0, 26)} ${n++}`;
         const hp = clamp(Math.round(num(e.hp, 8)), 1, 250);
         const en = { id: slug(name), name, hp, hpMax: hp, ac: clamp(Math.round(num(e.ac, 12)), 5, 25), defeated: false };
+        if (e.atk != null && Number.isFinite(+e.atk)) en.atk = clamp(Math.round(+e.atk), 0, 4 + s.level); // to-hit bonus
+        const dd = parseDice(e.dmg, s.level);
+        if (dd) en.dmg = diceStr(dd); // damage per hit, e.g. "1d6+1"
         s.enemies.push(en);
         return en;
     }
@@ -280,7 +298,7 @@
     function combatants(s) {
         return [
             { id: 'player', name: s.name, kind: 'player', mod: amod(s.stats?.dex), alive: s.hp > 0 },
-            ...s.party.map((p) => ({ id: `p:${p.id}`, name: p.name, kind: 'party', mod: Math.floor((p.ac - 10) / 2), alive: p.hp > 0 })),
+            ...s.party.map((p) => ({ id: `p:${p.id}`, name: p.name, kind: 'party', mod: amod(p.stats?.dex), alive: p.hp > 0 })),
             ...s.enemies.map((e) => ({ id: `e:${e.id}`, name: e.name, kind: 'enemy', mod: Math.floor((e.ac - 10) / 3), alive: !e.defeated })),
         ];
     }
@@ -305,16 +323,108 @@
         if (!s.combat?.order.length) return;
         s.combat.turn += 1;
         if (s.combat.turn >= s.combat.order.length) { s.combat.turn = 0; s.combat.round += 1; }
+        const id = s.combat.order[s.combat.turn]?.id;
+        if (id && s.combat.guard) delete s.combat.guard[id]; // a defensive stance lasts until that combatant's next turn
     }
 
     function logAttack(s, entry) {
         s.log = (s.log || []).concat({ round: s.combat?.round || 0, ...entry }).slice(-LOG_MAX);
     }
 
+    // ── auto-play: the game takes enemy turns (and allies' when you don't control them) and reports one summary ──
+    /** An enemy's attack bonus and damage dice; enemies the narrator registered without stats get a level-based default. */
+    function enemyStats(s, e) {
+        const lvl = s.level;
+        const atk = Number.isFinite(e.atk) ? e.atk : 2 + Math.floor(lvl / 2) + (e.hpMax >= 30 ? 1 : 0);
+        const dmg = e.dmg && parseDice(e.dmg, lvl) ? e.dmg : (lvl < 3 ? '1d6' : lvl < 6 ? '1d8' : '2d6');
+        return { atk: clamp(atk, 0, 4 + lvl), dmg };
+    }
+
+    /** Player-side combatants that can still be hit. */
+    const livingSide = (s) => [s.hp > 0 ? { ref: s, member: null } : null, ...s.party.filter((p) => p.hp > 0).map((p) => ({ ref: p, member: p }))].filter(Boolean);
+
+    /** Mostly goes for the most wounded target, sometimes anyone — so fights aren't perfectly predictable. */
+    function pickEnemyTarget(s) {
+        const side = livingSide(s);
+        if (!side.length) return null;
+        if (rnd(100) < 35) return side[rnd(side.length)];
+        return side.slice().sort((a, b) => a.ref.hp / a.ref.hpMax - b.ref.hp / b.ref.hpMax)[0];
+    }
+
+    function autoEnemyTurn(s, e) {
+        const tgt = pickEnemyTarget(s);
+        if (!tgt) return '';
+        const st = enemyStats(s, e);
+        return resolveDefend({ kind: 'defend', enemy: e.name, atk: st.atk, dmg: st.dmg, target: tgt.member?.name, adv: 0, mod: 0 }, { a: d20(), b: d20() }, s).text;
+    }
+
+    const avgDice = (spec, lvl) => { const d = parseDice(spec, lvl); return d ? d.n * (d.sides + 1) / 2 + d.plus : 0; };
+
+    /** A companion the game plays, following its stance: aggressive hits hard, defensive guards when hurt, support heals early. */
+    function autoAllyTurn(s, p) {
+        const mana = genreOf(s).terms.mana.toLowerCase();
+        const stance = p.stance || 'balanced';
+        const healBelow = { aggressive: 0.25, balanced: 0.5, defensive: 0.5, support: 0.75 }[stance];
+        const hurt = [s, ...s.party].filter((x) => x.hp > 0 && x.hp / x.hpMax < healBelow).sort((a, b) => a.hp / a.hpMax - b.hp / b.hpMax)[0];
+        const heal = (p.abilities || []).find((a) => a.kind === 'heal' && p.mana >= a.cost);
+        if (heal && hurt) {
+            p.mana -= heal.cost;
+            const before = hurt.hp;
+            hurt.hp = Math.min(hurt.hpMax, hurt.hp + rollDice(parseDice(heal.dmg, p.level) || parseDice('1d8')).total);
+            return `${p.name} used ${heal.name} on ${hurt === s ? s.name : hurt.name}: restored ${hurt.hp - before} HP (spent ${heal.cost} ${mana}).`;
+        }
+        if (stance === 'defensive' && p.hp / p.hpMax < 0.5 && s.combat && !s.combat.guard?.[`p:${p.id}`]) {
+            s.combat.guard = { ...(s.combat.guard || {}), [`p:${p.id}`]: true };
+            return `${p.name} takes a defensive stance — attacks against them have disadvantage until their next turn.`;
+        }
+        const foes = s.enemies.filter((e) => !e.defeated);
+        const foe = foes.find((e) => e.id === p.focus) || foes.sort((a, b) => a.hp - b.hp)[0]; // the focus target if set, else the weakest
+        if (!foe) return '';
+        const known = (p.abilities || []).filter((a) => a.kind === 'attack' && p.mana >= a.cost).sort((a, b) => avgDice(b.dmg, p.level) - avgDice(a.dmg, p.level));
+        // support keeps its mana for healing; aggressive always uses its strongest ability; others mix it in
+        const useAbility = known.length && (stance === 'aggressive' || (stance === 'balanced' && rnd(2) === 0) || (stance === 'defensive' && rnd(3) === 0)
+            || (stance === 'support' && !(p.abilities || []).some((a) => a.kind === 'heal')));
+        const use = useAbility ? known[0] : null;
+        return resolveAttack({ kind: 'attack', by: p.id, spell: !!use, dmg: use?.dmg, abilityName: use?.name, cost: use?.cost || 0, target: foe.name, ac: foe.ac, adv: 0, mod: 0 }, { a: d20(), b: d20() }, s).text;
+    }
+
+    /** Play every turn until it is one you control again (or the fight ends). Returns the result lines. */
+    function runAutoTurns(s, { enemies = true } = {}) {
+        const lines = [];
+        for (let i = 0; i < 16; i++) {
+            const c = s.combat;
+            if (!c?.order.length || !s.enemies.some((e) => !e.defeated) || !livingSide(s).length) break;
+            const o = c.order[c.turn];
+            if (!o) break;
+            if (o.kind === 'player') { if (s.hp > 0) break; }
+            else if (o.kind === 'party') {
+                const p = s.party.find((x) => `p:${x.id}` === o.id);
+                if (p && p.hp > 0) {
+                    if (isPlayed(p)) break;
+                    lines.push(autoAllyTurn(s, p));
+                }
+            } else {
+                if (!enemies) break; // enemy turns wait for the narrator unless auto-play is on
+                const e = s.enemies.find((x) => `e:${x.id}` === o.id);
+                if (e && !e.defeated) lines.push(autoEnemyTurn(s, e));
+            }
+            nextTurn(s);
+        }
+        return lines.filter(Boolean);
+    }
+    const autoTurnsText = (s, opts) => { const l = runAutoTurns(s, opts); return l.length ? `TURNS RESOLVED BY THE GAME: ${l.join(' ')}` : ''; };
+
     // ───────────────────────── party ─────────────────────────
     // Companions travel with the player. They have their own HP / mana / skills but no dice: the narrator plays them,
     // the game only keeps their numbers (via the "party" tag, or by hand in the Party tab).
     const PARTY_MAX = 6;
+    const defaultMemberStats = () => ({ str: 12, dex: 12, con: 12, int: 10, wis: 10, cha: 10 });
+    /** Narrator-supplied ability scores, clamped to a sane range; anything missing stays at the default. */
+    function normMemberStats(st) {
+        const out = defaultMemberStats();
+        for (const a of ['str', 'dex', 'con', 'int', 'wis', 'cha']) if (st && Number.isFinite(+st[a])) out[a] = clamp(Math.round(+st[a]), 3, 20);
+        return out;
+    }
 
     /** Accepts [["Archery",3]], ["Archery"], [{name,rank}] and returns clean {name, rank} entries. */
     function normSkills(list) {
@@ -348,11 +458,36 @@
             id, name, class: String(m.class || 'Companion').slice(0, 30), level: clamp(Math.round(num(m.level, s.level)), 1, 20),
             hp: hpMax, hpMax, mana: manaMax, manaMax, ac: clamp(Math.round(num(m.ac, 12)), 5, 25), baseAc: clamp(Math.round(num(m.ac, 12)), 5, 25),
             skills: normSkills(m.skills), note: String(m.note || '').slice(0, 120), inv: [],
+            stats: normMemberStats(m.stats), xp: 0, stance: 'balanced', control: '', focus: '',
         };
+        p.abilities = [];
         for (const it of [].concat(m.inv || []).slice(0, 8)) addToBag(p.inv, it, s.level);
+        for (const a of [].concat(m.abilities || []).slice(0, ABILITY_MAX)) addAbility(p, a);
         s.party.push(p);
         return p;
     }
+
+    // ── abilities: named actions with a mana cost and a damage (or healing) dice, for the player and every companion ──
+    const ABILITY_MAX = 6;
+    function normAbility(a, level = 1) {
+        const name = String(a?.name || '').trim().slice(0, 30);
+        if (!name) return null;
+        const kind = a?.kind === 'heal' ? 'heal' : 'attack';
+        const dice = parseDice(a?.dmg ?? a?.heal, level) || parseDice('1d8', level);
+        return { id: slug(name), name, kind, cost: clamp(Math.round(num(a?.cost, 1)), 0, 20), dmg: diceStr(dice), desc: String(a?.desc || '').slice(0, 100) };
+    }
+    function addAbility(owner, a) {
+        const n = normAbility(a, owner.level);
+        if (!n) return null;
+        owner.abilities = owner.abilities || [];
+        const i = owner.abilities.findIndex((x) => x.id === n.id);
+        if (i >= 0) owner.abilities[i] = n;
+        else if (owner.abilities.length < ABILITY_MAX) owner.abilities.push(n);
+        else return null;
+        return n;
+    }
+    /** 'player' → the sheet itself, otherwise a companion (both expose name, level, mana, hp, inv/abilities). */
+    const ownerOf = (s, id) => (id === 'player' ? s : s.party.find((p) => p.id === id) || null);
 
     // ── shared gear: the player and each companion carry their own bag; items can be handed back and forth ──
     const BAG_MAX = 30; // distinct stacks a companion can carry (the player's pack is uncapped)
@@ -509,6 +644,7 @@
         if (gained <= 0) return 0;
         s.xp += gained;
         notes.push(['info', `+${gained} XP${label ? ' — ' + label : ''}`]);
+        if (settings().allyXp) for (const p of s.party || []) gainMemberXp(s, p, gained, notes); // companions share the experience
         while (s.xp >= xpNeeded(s.level)) {
             s.xp -= xpNeeded(s.level);
             s.level += 1;
@@ -522,6 +658,24 @@
             notes.push(['success', `Level up! ${s.name} is now level ${s.level}.${pts ? ` +${pts} skill points.` : ''}${asi ? ' +1 ability point.' : ''}`]);
         }
         return gained;
+    }
+
+    /** Companions level on the same curve as the player. Each level: more HP/mana, a stronger best ability score, and a skill rank every other level. */
+    function gainMemberXp(s, p, amount, notes) {
+        p.xp = (p.xp || 0) + amount;
+        while (p.level < 20 && p.xp >= xpNeeded(p.level)) {
+            p.xp -= xpNeeded(p.level);
+            p.level += 1;
+            p.hpMax = clamp(p.hpMax + Math.max(1, 4 + amod(p.stats?.con)), 1, 500);
+            if (p.manaMax > 0) p.manaMax = clamp(p.manaMax + 2, 0, 200);
+            p.hp = p.hpMax; p.mana = p.manaMax;
+            const top = Object.entries(p.stats || {}).sort((a, b) => b[1] - a[1])[0]; // the ability they lean on grows
+            if (top && p.level % 2 === 0 && top[1] < 20) p.stats[top[0]] += 1;
+            const grown = p.level % 2 === 0 && p.skills.length ? p.skills.slice().sort((a, b) => b.rank - a.rank)[0] : null;
+            if (grown && grown.rank < num(settings().skillMaxRank, 5)) grown.rank += 1;
+            notes.push(['success', `${p.name} reached level ${p.level}!${grown ? ` ${grown.name} is now rank ${grown.rank}.` : ''}`]);
+        }
+        if (p.level >= 20) p.xp = 0;
     }
 
     const questReward = (q) => num(q.xp, DIFFICULTY[normDiff(q.difficulty)]);
@@ -634,6 +788,10 @@
                 for (const k of normSkills(u.skills)) {
                     const have = p.skills.find((x) => x.name.toLowerCase() === k.name.toLowerCase());
                     if (have) have.rank = k.rank; else if (p.skills.length < 12) p.skills.push(k);
+                }
+                for (const a of [].concat(u.abilities || []).slice(0, 2)) {
+                    const added = addAbility(p, a);
+                    if (added) notes.push(['info', `${p.name} learned ${added.name}`]);
                 }
                 if (u.inv && typeof u.inv === 'object') { // loot picked up / things used up by this companion
                     for (const it of [].concat(u.inv.add || []).slice(0, 3)) {
@@ -885,6 +1043,7 @@
             abilities: Object.fromEntries(ABILITIES.map((a) => [AB_NAME[a], `${s.stats[a]} (${fmtMod(amod(s.stats[a]))})`])),
             armor_class: combat ? computeAC(s) : undefined,
             luck: settings().luckRerolls ? `${s.luck}/${s.luckMax}` : undefined,
+            abilities: combat && s.abilities?.length ? s.abilities.map((a) => `${a.name} (${a.cost} ${G().terms.mana.toLowerCase()}, ${a.kind === 'heal' ? 'heals ' : ''}${a.dmg})`) : undefined,
             gear: combat ? {
                 weapon: (() => { const w = equippedOf(s, 'weapon'); return w ? `${w.name} (${w.dmg}${w.bonus ? ` +${w.bonus}` : ''}, ${AB_NAME[w.ability]})` : 'unarmed'; })(),
                 armor: equippedOf(s, 'armor')?.name || 'none', shield: equippedOf(s, 'shield')?.name || 'none',
@@ -898,7 +1057,9 @@
                 name: p.name, class: p.class, level: p.level,
                 hp: combat ? `${p.hp}/${p.hpMax}${p.hp === 0 ? ' DOWN' : ''}` : undefined, mana: combat && p.manaMax ? `${p.mana}/${p.manaMax}` : undefined,
                 ac: combat ? p.ac : undefined, skills: p.skills.length ? Object.fromEntries(p.skills.map((k) => [k.name, k.rank])) : undefined, note: p.note || undefined,
+                control: combat ? (isPlayed(p) ? 'player' : 'game') : undefined,
                 carrying: p.inv.length ? itemsText(p.inv) : undefined,
+                abilities: combat && p.abilities?.length ? p.abilities.map((a) => `${a.name} (${a.cost} mana, ${a.kind === 'heal' ? 'heals ' : ''}${a.dmg})`) : undefined,
                 equipped: combat && p.inv.some((i) => i.equipped) ? p.inv.filter((i) => i.equipped).map((i) => (i.type === 'weapon' ? `${i.name} (${i.dmg})` : i.name)).join(', ') : undefined,
             })) : undefined,
             quests: s.quests.filter((q) => q.status === 'active').slice(-8).map((q) => ({ id: q.id, title: q.title, desc: String(q.desc || '').slice(0, 100), progress: String(q.progress || '').slice(0, 100), difficulty: q.difficulty, reward: `${questReward(q)} XP` })),
@@ -916,7 +1077,7 @@ Schema (omit anything unchanged; use {} content only if nothing changed — or o
 {${combat ? '"hp":-3,"mana":-1,' : ''}${settings().xpMode === 'quests' ? '' : '"xp":5,'}"class":"${G().prompt.classExample}",
  "scene":{${G().prompt.sceneExample}},
 ${settings().trackRel ? ` "rel":{"${G().prompt.npcExample}":{"delta":5,"note":"short reason / how they feel"}},\n` : ''}${settings().modelUnlockSkills ? ' "skills":{"unlock":[{"name":"Lockpicking","desc":"one line"}]},\n' : ''} "inv":${G().prompt.invExample},
-${combat ? ` "enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":13}],"clear":true},\n` : ''}${settings().trackParty ? ` "party":{"add":[{"name":"Mira","class":"Rogue","level":2${combat ? ',"hp":22,"mana":0,"ac":13' : ''},"skills":[["Stealth",3]]}],"update":[{"name":"Mira"${combat ? ',"hp":-4' : ''},"note":"short"}],"transfer":[{"item":"Healing Potion","from":"player","to":"Mira","qty":1}],"remove":["Mira"]},\n` : ''} "quests":{"add":[{"id":"short_id","title":"Quest title","desc":"one line objective","difficulty":"trivial|easy|medium|hard|deadly"}],
+${combat ? ` "enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":13,"atk":4,"dmg":"1d6+1"}],"clear":true},\n` : ''}${settings().trackParty ? ` "party":{"add":[{"name":"Mira","class":"Rogue","level":2${combat ? ',"hp":22,"mana":0,"ac":13' : ''},"stats":{"dex":15,"cha":12},"skills":[["Stealth",3]]}],"update":[{"name":"Mira"${combat ? ',"hp":-4' : ''},"note":"short"}],"transfer":[{"item":"Healing Potion","from":"player","to":"Mira","qty":1}],"remove":["Mira"]},\n` : ''} "quests":{"add":[{"id":"short_id","title":"Quest title","desc":"one line objective","difficulty":"trivial|easy|medium|hard|deadly"}],
            "update":[{"id":"short_id","progress":"what's done / what's next","milestone":true}],
            "complete":["short_id"],"fail":["short_id"]}}
 Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp are'} DELTAS (hp negative for damage, positive for healing).` : (settings().xpMode === 'quests' ? '' : 'xp is a DELTA.')} ${settings().xpMode === 'quests'
@@ -950,7 +1111,8 @@ Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp 
     }
 
     /** Does this genre use the HP / AC / enemies layer? Social genres turn it off entirely. */
-    const hasCombat = (s) => genreOf(s).combat !== false;
+    // off for no-combat genres, or when this chat's "Combat system" toggle (GM tab) is switched off
+    const hasCombat = (s) => genreOf(s).combat !== false && !s?.combatOff;
 
     function renderCharacter(s) {
         const av = avatarUrl(s);
@@ -972,15 +1134,17 @@ Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp 
             ${s.statPoints > 0 && s.stats[a] < 20 ? `<button data-ogt-act="stat-up" data-ab="${a}" title="Spend an ability point">+</button>` : ''}</div>`).join('')}</div>
         <div class="ogt-acrow">${combat ? `AC <b>${computeAC(s)}</b> · ` : ''}Proficiency <b>${fmtMod(profBonus(s.level))}</b> · <b>${s.gold}</b> ${G().terms.cash}${settings().luckRerolls ? ` · <span class="luck" title="Spend Luck to reroll a failed check">🍀 <b>${s.luck}/${s.luckMax}</b></span>` : ''}${s.statPoints > 0 ? ` · <span class="pts">${s.statPoints} ability point${s.statPoints === 1 ? '' : 's'}</span>` : ''}</div>`;
 
+        if (combat && (s.abilities?.length || editingChar)) h += `<div class="ogt-section">ABILITIES</div>${abilitiesHtml(s, 'player', editingChar)}`;
+
         // no-combat genres: the people in your life come first, right under your stats
         if (!combat && settings().trackRel) h += relationshipsHtml(s);
 
         const foes = s.enemies.filter((e) => !e.defeated);
         if (combat && s.enemies.length) {
-            h += `<div class="ogt-section">COMBAT</div>${initiativeHtml(s)}${s.enemies.map((e) => `<div class="ogt-foe ${e.defeated ? 'dead' : ''}" data-eid="${esc(e.id)}">
+            h += `<div class="ogt-section">COMBAT</div>${initiativeHtml(s)}${actionBarHtml(s)}${s.enemies.map((e) => `<div class="ogt-foe ${e.defeated ? 'dead' : ''}" data-eid="${esc(e.id)}">
                 <div class="ogt-foe-head"><span>${esc(e.name)}</span><span>AC ${e.ac}</span></div>
                 <div class="ogt-bar"><div class="ogt-fill hp" style="width:${clamp((e.hp / e.hpMax) * 100, 0, 100)}%"></div></div>
-                <div class="ogt-foe-foot"><span>${e.defeated ? 'Defeated' : `${e.hp}/${e.hpMax} HP`}</span><button class="ogt-btn small" data-ogt-act="foe-del" title="Remove">✕</button></div></div>`).join('')}
+                <div class="ogt-foe-foot"><span>${e.defeated ? 'Defeated' : `${e.hp}/${e.hpMax} HP · ${(() => { const st = enemyStats(s, e); return `${fmtMod(st.atk)} to hit · ${esc(st.dmg)}`; })()}`}</span><button class="ogt-btn small" data-ogt-act="foe-del" title="Remove">✕</button></div></div>`).join('')}
                 ${foes.length ? '' : '<div class="ogt-empty">All enemies defeated.</div>'}
                 <button class="ogt-btn ogt-wide" data-ogt-act="foes-clear">End combat</button>${attackLogHtml(s)}`;
         }
@@ -1013,13 +1177,70 @@ Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp 
         return h + relationshipsHtml(s);
     }
 
+    /** Ability list for the player or a companion: name, cost and damage / healing. `editing` adds delete buttons and the add form. */
+    function abilitiesHtml(owner, ownerId, editing) {
+        const mana = G().terms.mana;
+        const list = owner.abilities || [];
+        let h = list.length ? list.map((a) => `<div class="ogt-ab-row"><span><b>${esc(a.name)}</b> · ${a.cost} ${esc(mana)} · ${a.kind === 'heal' ? 'heals ' : ''}${esc(a.dmg)}</span>
+            ${editing ? `<button class="ogt-btn small" data-ogt-act="ab-del" data-owner="${esc(ownerId)}" data-aid="${esc(a.id)}" title="Forget">✕</button>` : ''}</div>`).join('')
+            : (editing ? '<div class="ogt-empty">No abilities yet.</div>' : '');
+        if (editing && list.length < ABILITY_MAX) {
+            const id = (k) => `ogt-ab-${k}-${esc(ownerId)}`;
+            h += `<div class="ogt-form ogt-ab-form">
+                <label>Ability<input id="${id('name')}" type="text" placeholder="e.g. Fireball"></label>
+                <label>${esc(mana)} cost<input id="${id('cost')}" type="number" min="0" max="20" value="1"></label>
+                <label>Damage / heal dice<input id="${id('dmg')}" type="text" value="1d8" placeholder="2d6"></label>
+                <label>Type<select id="${id('kind')}"><option value="attack">Attack (rolls to hit)</option><option value="heal">Heal an ally</option></select></label>
+                <button class="ogt-btn ogt-wide" data-ogt-act="ab-add" data-owner="${esc(ownerId)}">Add / replace ability</button></div>`;
+        }
+        return h;
+    }
+
+    /** The turn's available actions for whoever you control right now (you or a companion). */
+    function actionBarHtml(s) {
+        const c = s.combat;
+        if (!c?.order.length) return '';
+        const h = turnHolder(s);
+        if (!h) {
+            const o = c.order[c.turn];
+            return `<div class="ogt-act foe"><div class="ogt-act-head"><span>${o?.kind === 'party' ? '🛡' : '☠'} ${esc(o?.name || 'Enemy')}'s turn</span></div>
+                <div class="ogt-empty">${o?.kind === 'party' ? 'Allies are played by the narrator (setting).' : 'Enemy turns are played by the narrator.'} Continue the story, or press Next turn.</div></div>`;
+        }
+        const mana = G().terms.mana, ref = h.ref;
+        const foes = s.enemies.filter((e) => !e.defeated);
+        actSel.foe = foes.find((e) => e.id === actSel.foe)?.id || foes[0]?.id || '';
+        const allies = [['player', `${s.name} (you)`], ...s.party.map((p) => [p.id, p.name])];
+        if (!allies.some(([v]) => v === actSel.ally)) actSel.ally = 'player';
+        const items = usableItems(bagFor(s, h.id));
+        if (!items.some((i) => `${i.id}|${i.type}` === actSel.item)) actSel.item = items[0] ? `${items[0].id}|${items[0].type}` : '';
+        const st = attackStats(s, h.id, false);
+        const opt = (v, l, cur) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`;
+        const abBtns = (ref.abilities || []).map((a) => `<button class="ogt-btn" data-ogt-act="act-ability" data-aid="${esc(a.id)}" ${ref.mana < a.cost ? 'disabled' : ''}>${esc(a.name)}
+            <small>${a.cost} ${esc(mana)} · ${a.kind === 'heal' ? 'heals ' : ''}${esc(a.dmg)}</small></button>`).join('');
+        return `<div class="ogt-act"><div class="ogt-act-head"><span>⚔ ${esc(h.name)}'s turn</span>${ref.manaMax ? `<span>${esc(mana)} ${ref.mana}/${ref.manaMax}</span>` : ''}</div>
+            <div class="ogt-act-pick">
+                <label class="ogt-target">Enemy <select id="ogt-act-foe" data-ogt-sel="foe">${foes.map((e) => opt(e.id, `${e.name} · AC ${e.ac} · ${e.hp}/${e.hpMax}`, actSel.foe)).join('')}</select></label>
+                <label class="ogt-target">Ally <select id="ogt-act-ally" data-ogt-sel="ally">${allies.map(([v, l]) => opt(v, l, actSel.ally)).join('')}</select></label>
+            </div>
+            <div class="ogt-act-grid">
+                <button class="ogt-btn" data-ogt-act="act-attack">⚔ Attack<small>${esc(st.how)} · ${esc(diceStr(st.dmgDice))} · ${fmtMod(st.bonus)} to hit</small></button>
+                ${abBtns}
+                <button class="ogt-btn" data-ogt-act="act-defend">🛡 Defend<small>attackers at disadvantage</small></button>
+                <button class="ogt-btn" data-ogt-act="act-flee">🏃 Flee<small>whole party, DEX check</small></button>
+            </div>
+            ${items.length ? `<div class="ogt-act-pick"><label class="ogt-target">Item <select id="ogt-act-item" data-ogt-sel="item">${items.map((i) => opt(`${i.id}|${i.type}`, `${i.name}${i.qty > 1 ? ' ×' + i.qty : ''} · ${itemBadge(i)}`, actSel.item)).join('')}</select></label>
+                <button class="ogt-btn small" data-ogt-act="act-item">Use on ally</button></div>` : ''}
+            <div class="ogt-addrow"><input id="ogt-act-custom" placeholder="Something else… (the narrator decides)"><button class="ogt-btn small" data-ogt-act="act-custom">Do it</button></div></div>`;
+    }
+
     /** Turn order for the current fight: highlighted current combatant, round counter, manual advance / reroll. */
     function initiativeHtml(s) {
         const c = s.combat;
         if (!c?.order.length) return '';
         const icon = { player: '⭐', party: '🛡', enemy: '☠' };
         return `<div class="ogt-init"><div class="ogt-init-head"><span>INITIATIVE · Round ${c.round}</span>
-            <span><button class="ogt-btn small" data-ogt-act="init-next" title="Advance to the next combatant">Next turn ›</button>
+            <span>${turnHolder(s) ? '' : `<button class="ogt-btn small" data-ogt-act="init-run" title="Let the game play the enemy (and uncontrolled ally) turns until it is yours again">▶ Run turns</button>`}
+            <button class="ogt-btn small" data-ogt-act="init-next" title="Advance to the next combatant">Next turn ›</button>
             <button class="ogt-btn small" data-ogt-act="init-reroll" title="Roll initiative again">🎲</button></span></div>
             ${c.order.map((o, i) => `<div class="ogt-init-row ${o.kind} ${i === c.turn ? 'now' : ''}"><span>${icon[o.kind] || ''} ${esc(o.name)}</span><span>${o.init}</span></div>`).join('')}</div>`;
     }
@@ -1070,10 +1291,13 @@ Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp 
             const down = combat && p.hp === 0;
             h += `<div class="ogt-rel ogt-pm ${open ? 'open' : ''} ${down ? 'down' : ''}" data-pid="${esc(p.id)}">
                 <div class="ogt-rel-head" data-ogt-act="toggle-pm"><div><div class="ogt-rel-name">${esc(p.name)}</div>
-                <div class="ogt-rel-tier neu">${esc(p.class)} · Lv ${p.level}${combat ? ` · AC ${p.ac}` : ''}${down ? ' · DOWN' : ''}</div></div><span class="ogt-chev">▾</span></div>
+                <div class="ogt-rel-tier neu">${esc(p.class)} · Lv ${p.level}${combat ? ` · AC ${p.ac} · ${isPlayed(p) ? '🎮 you play' : '🤖 ' + p.stance}` : ''}${down ? ' · DOWN' : ''}</div></div><span class="ogt-chev">▾</span></div>
                 <div class="ogt-rel-body">
-                    ${combat ? `<div class="ogt-stats">${bar('HP', 'hp', p.hp, p.hpMax)}${p.manaMax ? bar(G().terms.mana.toUpperCase(), 'mana', p.mana, p.manaMax) : ''}</div>` : ''}
+                    <div class="ogt-stats">${combat ? `${bar('HP', 'hp', p.hp, p.hpMax)}${p.manaMax ? bar(G().terms.mana.toUpperCase(), 'mana', p.mana, p.manaMax) : ''}` : ''}${p.level < 20 ? bar(`LVL ${p.level}`, 'xp', p.xp || 0, xpNeeded(p.level)) : ''}</div>
+                    <div class="ogt-pm-abilities">${ABILITIES.map((a) => `<span title="${AB_FULL[a]}"><b>${AB_NAME[a]}</b> ${p.stats?.[a] ?? 10} <i>${fmtMod(amod(p.stats?.[a]))}</i></span>`).join('')}</div>
                     ${p.skills.length ? `<div class="ogt-pm-skills">${p.skills.map((k) => `<span class="ogt-xpchip">${esc(k.name)} ${k.rank}</span>`).join('')}</div>` : ''}
+                    ${combat ? (() => { const st = attackStats(s, p.id, false); return `<div class="ogt-acrow">⚔ <b>${esc(st.how)}</b> · ${esc(diceStr(st.dmgDice))}${st.extra ? fmtMod(st.extra) : ''} damage · <b>${fmtMod(st.bonus)}</b> to hit</div>`; })() : ''}
+                    ${combat ? abilitiesHtml(p, p.id, open) : ''}
                     ${p.note ? `<div class="ogt-note">${esc(p.note)}</div>` : ''}
                     ${!open && p.inv.length ? `<div class="ogt-note">🎒 ${esc(itemsText(p.inv))}</div>` : ''}
                     ${open ? `<div class="ogt-section">CARRYING</div>${p.inv.length ? p.inv.map((i) => memberItemHtml(s, p, i)).join('') : '<div class="ogt-empty">Nothing. Hand them something from your Gear tab.</div>'}
@@ -1087,7 +1311,16 @@ Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp 
                         ${combat ? `${pf(p, 'hp', 'HP')}${pf(p, 'hpMax', 'Max HP')}${pf(p, 'mana', G().terms.mana)}${pf(p, 'manaMax', 'Max ' + G().terms.mana.toLowerCase())}${pf(p, 'baseAc', 'Base AC (no armor)')}` : ''}
                         <label>Skills (name rank, …)<input data-ogt-pfield="skills" type="text" value="${esc(skillText(p))}"></label>
                         ${pf(p, 'note', 'Note', 'text')}
+                        ${ABILITIES.map((a) => `<label>${AB_NAME[a]}<input data-ogt-pstat="${a}" type="number" min="3" max="20" value="${p.stats?.[a] ?? 10}"></label>`).join('')}
                     </div>
+                    ${combat ? `<div class="ogt-section">TACTICS</div><div class="ogt-form">
+                        <label>Who plays their turns<select data-ogt-pfield="control">
+                            ${[['', `Default (${settings().allyControl ? 'me' : 'game'})`], ['me', 'Me — action bar'], ['auto', 'Game — follows tactics']].map(([v, l]) => `<option value="${v}" ${p.control === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+                        <label>Stance (when the game plays them)<select data-ogt-pfield="stance">
+                            ${[['balanced', 'Balanced — attacks, heals under 50%'], ['aggressive', 'Aggressive — strongest ability, heals under 25%'], ['defensive', 'Defensive — guards when hurt'], ['support', 'Support — heals early, saves mana']].map(([v, l]) => `<option value="${v}" ${p.stance === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+                        <label>Focus target<select data-ogt-pfield="focus"><option value="">Weakest enemy</option>
+                            ${s.enemies.filter((e) => !e.defeated).map((e) => `<option value="${esc(e.id)}" ${p.focus === e.id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}</select></label>
+                    </div>` : ''}
                     <div class="ogt-rel-foot"><span></span><button class="ogt-btn small danger" data-ogt-act="pm-del">Remove from party</button></div>` : ''}
                 </div>
             </div>`;
@@ -1162,43 +1395,95 @@ Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp 
         const nat = adv > 0 ? Math.max(dice.a, dice.b) : adv < 0 ? Math.min(dice.a, dice.b) : dice.a;
         const sk = findSkill(s, r.skill);
         const ab = ABILITIES.includes(r.ability) ? r.ability : null; // raw ability check when no skill fits
-        const bonus = sk ? skillBonus(s, sk) : (ab ? amod(s.stats?.[ab]) : 0);
+        const who = checkActors(s, r);
+        let bonus = sk ? skillBonus(s, sk) : (ab ? amod(s.stats?.[ab]) : 0);
+        let skill = sk?.name || (ab ? `${AB_FULL[ab]}` : String(r.skill || 'Unskilled').slice(0, 30)), trained = !!sk, ability = sk ? abilityOf(sk) : ab;
+        if (who.performer) { // a companion takes the check with their own skills and ability scores
+            const info = memberSkillInfo(who.performer, r.skill, ab);
+            ({ bonus, trained, ability } = info);
+            skill = info.name || skill;
+        }
         const rel = socialBonus(s, r.npc);
-        const total = nat + bonus + mod + rel;
+        const help = who.helper ? assistBonus(who.helper, r.skill) : 0;
+        const total = nat + bonus + mod + rel + help;
         const outcome = nat === 20 ? 'crit' : nat === 1 ? 'critfail'
             : total >= dc ? (total >= dc + 5 ? 'strong' : 'success') : (total <= dc - 5 ? 'badfail' : 'fail');
         return {
-            skill: sk?.name || (ab ? `${AB_FULL[ab]}` : String(r.skill || 'Unskilled').slice(0, 30)), trained: !!sk, ability: sk ? abilityOf(sk) : ab,
+            skill, trained, ability,
             npc: r.npc ? String(r.npc).slice(0, 30) : undefined, rel,
+            byName: who.performer?.name, help, helpName: help ? who.helper.name : undefined,
             bonus, mod, adv, dice: [dice.a, dice.b], nat, total, dc, outcome, why: String(r.why || '').slice(0, 80),
         };
+    }
+
+    // ── companions taking or helping with skill checks ──
+    /** Who rolls (a companion instead of you) and who assists, resolved from the ids saved on the check card. */
+    function checkActors(s, r) {
+        const performer = r.by && r.by !== 'player' ? s.party.find((p) => p.id === r.by) || null : null;
+        const helper = r.assist ? s.party.find((p) => p.id === r.assist && p !== performer) || null : null;
+        return { performer, helper };
+    }
+    function memberSkillInfo(p, skillName, abilityHint) {
+        const q = slug(skillName || '');
+        const k = q ? p.skills.find((x) => slug(x.name) === q) || p.skills.find((x) => slug(x.name).includes(q) || q.includes(slug(x.name))) : null;
+        const ability = ABILITIES.includes(abilityHint) ? abilityHint : (SKILL_ABILITY[slug(k?.name || skillName || '')] || null);
+        return { trained: !!k, name: k?.name, ability, bonus: (k ? k.rank : 0) + (ability ? amod(p.stats?.[ability]) : 0) };
+    }
+    /** An ally with the skill lends a hand: +1 per two ranks (1-3). One without it can't help. */
+    function assistBonus(helper, skillName) {
+        const info = memberSkillInfo(helper, skillName, null);
+        const k = info.trained ? helper.skills.find((x) => x.name === info.name) : null;
+        return k ? clamp(Math.ceil(k.rank / 2), 1, 3) : 0;
     }
 
     const pickNat = (dice, adv) => (adv > 0 ? Math.max(dice.a, dice.b) : adv < 0 ? Math.min(dice.a, dice.b) : dice.a);
 
     /** Player attack: d20 + proficiency + ability + weapon bonus vs the target's AC; on a hit roll weapon damage and hurt the tracked enemy. */
+    /** To-hit bonus, damage dice and flavour for whoever is attacking: the player (no `by`) or a companion (`by` = member id). */
+    function attackStats(s, byId, spell, dmgSpec, abilityName) {
+        const p = byId && byId !== 'player' ? s.party.find((x) => x.id === byId) : null;
+        if (p) {
+            const wp = spell ? null : equippedIn(p.inv, 'weapon');
+            const mod = amod(p.stats?.[spell ? 'int' : (wp?.ability || 'str')]); // weapons use STR or DEX, abilities use INT, like the player
+            return {
+                name: p.name, bonus: profBonus(p.level) + mod + (wp?.bonus || 0),
+                dmgDice: spell ? (parseDice(dmgSpec, p.level) || parseDice('1d6')) : (parseDice(wp?.dmg, p.level) || parseDice('1d4')),
+                extra: spell ? 0 : mod + (wp?.bonus || 0), how: spell ? (abilityName || 'a special ability') : (wp ? wp.name : 'unarmed'),
+            };
+        }
+        const { w, ability, magic, bonus } = attackProfile(s, spell);
+        return {
+            name: s.name, bonus, dmgDice: spell ? (parseDice(dmgSpec, s.level) || parseDice('1d8')) : (parseDice(w?.dmg) || parseDice('1d2')),
+            extra: spell ? 0 : amod(s.stats?.[ability]) + magic, how: spell ? (abilityName || genreOf(s).terms.special) : (w ? w.name : 'unarmed'),
+        };
+    }
+
     function resolveAttack(chk, dice, s) {
         const spell = !!chk.spell;
-        const { w, ability, magic, bonus } = attackProfile(s, spell);
+        const st = attackStats(s, chk.by, spell, chk.dmg, chk.abilityName);
+        const { bonus, how } = st;
         const adv = Math.sign(num(chk.adv, 0)), mod = clamp(Math.round(num(chk.mod, 0)), -5, 5);
         const nat = pickNat(dice, adv), total = nat + bonus + mod;
         const ac = clamp(Math.round(num(chk.ac, 12)), 5, 25);
         const crit = nat === 20, hit = crit || (nat !== 1 && total >= ac);
-        const dmgDice = spell ? (parseDice(chk.dmg, s.level) || parseDice('1d8')) : (parseDice(w?.dmg) || parseDice('1d2'));
+        if (chk.cost) { // abilities cost mana whether or not they land
+            const payer = ownerOf(s, chk.by || 'player');
+            if (payer) payer.mana = Math.max(0, payer.mana - chk.cost);
+        }
         let dmg = 0;
-        if (hit) dmg = Math.max(1, rollDice(dmgDice, { crit, extra: spell ? 0 : amod(s.stats?.[ability]) + magic }).total);
+        if (hit) dmg = Math.max(1, rollDice(st.dmgDice, { crit, extra: st.extra }).total);
         const foe = findEnemy(s, chk.target);
         if (hit && foe) { foe.hp = Math.max(0, foe.hp - dmg); if (foe.hp === 0) foe.defeated = true; }
         const label = crit ? 'Critical Hit' : hit ? 'Hit' : nat === 1 ? 'Critical Miss' : 'Miss';
-        const how = spell ? genreOf(s).terms.special : (w ? w.name : 'unarmed');
         const foeTxt = foe ? ` ${foe.name}: ${foe.hp}/${foe.hpMax} HP${foe.defeated ? ' — DEFEATED' : ''}.` : '';
         const adTxt = adv ? ` (${adv > 0 ? 'advantage' : 'disadvantage'})` : '';
-        logAttack(s, { side: 'ally', who: s.name, target: foe?.name || String(chk.target || 'target').slice(0, 30), nat, hit, crit, dmg, how });
+        const costTxt = chk.cost ? ` (spent ${chk.cost} ${genreOf(s).terms.mana.toLowerCase()})` : '';
+        logAttack(s, { side: 'ally', who: st.name, target: foe?.name || String(chk.target || 'target').slice(0, 30), nat, hit, crit, dmg, how });
         return {
             kind: 'attack', nat, total, dice: [dice.a, dice.b], adv, outcome: crit ? 'crit' : hit ? 'success' : nat === 1 ? 'critfail' : 'fail',
-            title: `Attack · ${chk.target || 'target'}`, why: String(chk.why || '').slice(0, 80), label,
+            title: chk.by && chk.by !== 'player' ? `${st.name} → ${chk.target || 'target'}` : `Attack · ${chk.target || 'target'}`, why: String(chk.why || '').slice(0, 80), label,
             line: `d20 ${nat} ${fmtMod(bonus + mod)} = ${total} vs AC ${ac}${hit ? ` · ${dmg} damage` : ''}${foe ? ` · ${foe.name} ${foe.hp}/${foe.hpMax}${foe.defeated ? ' ☠' : ''}` : ''}`,
-            text: `Attack on ${chk.target || 'the target'} with ${how}: d20 ${nat}${adTxt} ${fmtMod(bonus + mod)} = ${total} vs AC ${ac} — ${label.toUpperCase()}${hit ? `, ${dmg} damage dealt (already applied by the game)` : ''}.${foeTxt}`,
+            text: `${st.name}'s attack on ${chk.target || 'the target'} with ${how}${costTxt}: d20 ${nat}${adTxt} ${fmtMod(bonus + mod)} = ${total} vs AC ${ac} — ${label.toUpperCase()}${hit ? `, ${dmg} damage dealt (already applied by the game)` : ''}.${foeTxt}`,
         };
     }
 
@@ -1208,7 +1493,8 @@ Rules: ${combat ? `hp${settings().xpMode === 'quests' ? '/mana are' : '/mana/xp 
         const ac = ally ? ally.ac : computeAC(s);
         const victim = ally ? ally.name : s.name;
         const atk = clamp(Math.round(num(chk.atk, 3)), 0, 4 + s.level);
-        const adv = Math.sign(num(chk.adv, 0)), mod = clamp(Math.round(num(chk.mod, 0)), -5, 5);
+        const guarded = !!s.combat?.guard?.[ally ? `p:${ally.id}` : 'player']; // took the Defend action: attackers have disadvantage
+        const adv = clamp(Math.sign(num(chk.adv, 0)) - (guarded ? 1 : 0), -1, 1), mod = clamp(Math.round(num(chk.mod, 0)), -5, 5);
         const nat = pickNat(dice, adv), total = nat + atk + mod;
         const crit = nat === 20, hit = crit || (nat !== 1 && total >= ac);
         const dd = parseDice(chk.dmg, s.level) || parseDice('1d6');
@@ -1252,11 +1538,11 @@ The check must live ONLY inside that hidden <!--OGT:…--> comment. Never write 
 ${SOCIAL_RULES}${G().prompt.socialExtra || ''}${hasCombat(s) ? `
 
 [Combat — the game resolves every attack and tracks enemy HP]
-- Register each enemy the moment it appears, with sensible stats: <!--OGT:{"enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":13}]}}-->. Typical AC: ${G().prompt.acGuide}. Use "enemies":{"clear":true} when the fight ends.
+- Register each enemy the moment it appears, with sensible stats: <!--OGT:{"enemies":{"add":[{"name":"${G().prompt.enemyExample}","hp":9,"ac":13,"atk":4,"dmg":"1d6+1"}]}}--> ("atk" = its to-hit bonus +2..+8, "dmg" = damage dice per hit, scaled to its threat — the game uses them to play its turns).${settings().autoEnemies ? ' ENEMY TURNS ARE AUTOMATIC: the game rolls every enemy attack itself and sends you the results as "TURNS RESOLVED BY THE GAME: …" lines inside a [ROLL] result. Narrate exactly those results; NEVER request "defend" checks, invent enemy attacks or damage, or report "initiative.next" (the game advances the turns itself).' : ''} Typical AC: ${G().prompt.acGuide}. Use "enemies":{"clear":true} when the fight ends.
 - When the PLAYER attacks (${G().prompt.attackWho}), stop and request: "check":{"kind":"attack","target":"${G().prompt.enemyExample}","ac":13,"why":"the attack, in a few words"} (${G().prompt.attackSpell}). The game rolls the hit and damage with their real weapon and applies it to that enemy.
 - When an ENEMY attacks the player, stop and request: "check":{"kind":"defend","enemy":"${G().prompt.enemyExample}","atk":4,"dmg":"1d6+1","why":"how it strikes"} (atk +2..+8, dmg by threat). The game rolls against the player's AC and applies the damage to their HP itself — NEVER also report "hp" for combat damage.${settings().trackParty && s.party.length ? ' To aim the enemy at a party member instead, add "target":"<their name>" — the game then rolls against THEIR armor and applies the damage to THEM (never also report their hp for that attack).' : ''}
-- Initiative: the tracker lists a turn order (see "initiative" in the state). Run the fight in that order, one combatant's action at a time — request a player attack only on the player's turn, and make enemies/allies act on theirs. After you narrate, report how many turns passed with "initiative":{"next":N} in the tag (N = turns advanced, 0-6); the game keeps the order and round count. Enemies you add mid-fight join the order automatically.
-- Attacks with no dice: when a PARTY MEMBER attacks an enemy, resolve it yourself (damage roughly 2-10 for a low-level fighter, scaled by class and level) and report it in the tag: "attacks":[{"who":"Mira","target":"${G().prompt.enemyExample}","hit":true,"dmg":6,"crit":false}] — the game subtracts that damage from the enemy's HP and logs it. If the member has an "equipped" weapon the game rolls its damage itself (your "dmg" is ignored), so just decide hit or miss; a member's AC already includes their equipped armor and shield. Do the same for any other enemy attack you narrate without a check (use "hit":false for misses), but for those the damage to the party is applied through "party.update" hp, NOT through "attacks" (which only logs them). Never list the player's own checked attacks here.
+- Initiative: the tracker lists a turn order (see "initiative" in the state). Run the fight in that order, one combatant's action at a time — the PLAYER plays their own turn, and any companion with "control":"player", through the game's action bar. Companions with "control":"game"${settings().autoEnemies ? ' and all enemies' : ''} are played by the game and reported to you as "TURNS RESOLVED BY THE GAME" lines. You narrate ${settings().autoEnemies ? 'what those results say and the outcomes you receive' : 'ENEMY turns and the outcomes you receive'}; never invent an attack or action for the player or a companion, and stop when a player-controlled turn comes up. After you narrate, report how many turns passed with "initiative":{"next":N} in the tag (N = turns advanced, 0-6); the game keeps the order and round count. Enemies you add mid-fight join the order automatically.
+- Attacks with no check: an enemy attack you narrate without a "defend" check can be logged with "attacks":[{"who":"<enemy name>","target":"<who it hit>","hit":true,"dmg":N}] — log only; apply the damage to a party member through "party.update" hp. The player and every companion resolve their own attacks through the game (you play neither), so never report those.
 - The result tells you hit/miss, damage dealt and the enemy's remaining HP. Narrate it exactly; a DEFEATED enemy is dead or out of the fight. Skill checks stay "kind":"skill" (or omit kind). One check per turn, so run a fight one attack at a time.
 - Never invent the player's gear: they carry only what the sheet's "gear" lists. Give loot/purchases with "inv.add" (and "inv.remove" when something is used up), never in prose alone.` : `
 
@@ -1297,12 +1583,13 @@ ${SOCIAL_RULES}${G().prompt.socialExtra || ''}`;
         const sign = (n) => (n >= 0 ? `+ ${n}` : `− ${Math.abs(n)}`);
         const diceTxt = r.adv ? `d20 [${r.dice[0]}, ${r.dice[1]}] → ${r.nat} (${r.adv > 0 ? 'adv' : 'dis'})` : `d20 ${r.nat}`;
         const parts = [diceTxt, `${sign(r.bonus)} ${r.trained ? 'skill' : r.ability ? AB_NAME[r.ability] : 'untrained'}`];
+        if (r.help) parts.push(`${sign(r.help)} ${r.helpName}'s help`);
         if (r.rel) parts.push(`${sign(r.rel)} ${r.npc ? r.npc + "'s" : 'their'} attitude`);
         if (r.mod) parts.push(`${sign(r.mod)} situation`);
         return `<div class="ogt-roll ogt-card out-${r.outcome}" data-kind="${kind}" data-sig="${esc(sig)}">
             <div class="ogt-die">${r.nat}</div>
             <div class="ogt-roll-main">
-                <div class="ogt-roll-title">${esc(r.skill)} check${r.why ? `<span> · ${esc(r.why)}</span>` : ''}</div>
+                <div class="ogt-roll-title">${r.byName ? esc(r.byName) + ': ' : ''}${esc(r.skill)} check${r.why ? `<span> · ${esc(r.why)}</span>` : ''}</div>
                 <div class="ogt-roll-math">${parts.join(' ')} = <b>${r.total}</b> vs DC ${r.dc}${esc(reTxt)}</div>
             </div>
             <div class="ogt-roll-out">${OUTCOMES[r.outcome]}</div>${actions}
@@ -1350,16 +1637,29 @@ ${SOCIAL_RULES}${G().prompt.socialExtra || ''}`;
     function checkHtml(k, live, sig) {
         const sign = (n) => (n >= 0 ? `+${n}` : `−${Math.abs(n)}`);
         const extra = [k.mod ? `${sign(k.mod)} situation` : '', k.adv ? (k.adv > 0 ? 'advantage' : 'disadvantage') : ''].filter(Boolean).join(' · ');
-        let title, math, btn;
+        let title, math, btn, rollerSel = '';
         if (k.kind === 'attack') {
-            title = `Attack · ${k.target}`; math = `${sign(k.bonus + k.mod)} to hit · AC ${k.ac}${k.spell ? ' · ' + G().terms.special : ''}`; btn = 'Roll attack';
+            title = k.byName ? `${k.byName} → ${k.target}` : `Attack · ${k.target}`;
+            math = `${sign(k.bonus + k.mod)} to hit · AC ${k.ac}${k.abilityName ? ' · ' + k.abilityName : k.spell ? ' · ' + G().terms.special : ''}${k.cost ? ` · ${k.cost} ${G().terms.mana}` : ''}`; btn = 'Roll attack';
         } else if (k.kind === 'defend') {
             const ally = k.target ? findMember(getState(), k.target) : null;
             title = `${k.enemy} attacks ${ally ? ally.name : 'you'}`; math = `${sign(k.atk + k.mod)} to hit · ${ally ? ally.name + "'s" : 'your'} AC ${ally ? ally.ac : computeAC(getState())}`; btn = 'Defend';
         } else {
-            const src = k.trained ? `skill${k.ability ? ` (${AB_NAME[k.ability]})` : ''}` : k.ability ? AB_NAME[k.ability] : 'untrained';
+            const st = getState(), who = checkActors(st, k);
+            let { bonus, trained, ability } = k;
+            if (who.performer) ({ bonus, trained, ability } = memberSkillInfo(who.performer, k.skill, ABILITIES.includes(k.ability) ? k.ability : null));
+            const help = who.helper ? assistBonus(who.helper, k.skill) : 0;
+            const src = trained ? `skill${ability ? ` (${AB_NAME[ability]})` : ''}` : ability ? AB_NAME[ability] : 'untrained';
             const relTxt = k.rel ? ` · ${sign(k.rel)} ${k.npc ? k.npc + "'s" : 'their'} attitude` : '';
-            title = `${k.skill} check`; math = `${sign(k.bonus)} ${src}${relTxt}${extra ? ' · ' + extra : ''} · DC ${k.dc}`; btn = 'Roll d20';
+            title = `${who.performer ? who.performer.name + ': ' : ''}${k.skill} check`;
+            math = `${sign(bonus)} ${src}${help ? ` · ${sign(help)} ${who.helper.name}'s help` : ''}${relTxt}${extra ? ' · ' + extra : ''} · DC ${k.dc}`; btn = 'Roll d20';
+            // pick who rolls (a companion with a better bonus can take it) and who lends a hand
+            if (live && !k.result && settings().trackParty && st.party.length) {
+                const hint = ABILITIES.includes(k.ability) ? k.ability : null;
+                const helpers = st.party.filter((p) => p.id !== k.by && assistBonus(p, k.skill) > 0);
+                rollerSel = `<div class="ogt-decide"><label class="ogt-target">Rolled by <select class="ogt-roller-sel"><option value="player">${esc(st.name)} (you) ${sign(k.bonus)}</option>${st.party.map((p) => `<option value="${esc(p.id)}" ${k.by === p.id ? 'selected' : ''}>${esc(p.name)} ${sign(memberSkillInfo(p, k.skill, hint).bonus)}</option>`).join('')}</select></label>
+                    ${helpers.length ? `<label class="ogt-target">Help <select class="ogt-assist-sel"><option value="">no one</option>${helpers.map((p) => `<option value="${esc(p.id)}" ${k.assist === p.id ? 'selected' : ''}>${esc(p.name)} ${sign(assistBonus(p, k.skill))}</option>`).join('')}</select></label>` : ''}</div>`;
+            }
         }
         // the player picks who to hit (the narrator's suggestion is pre-selected)
         const foes = k.kind === 'attack' && live && !k.result ? getState().enemies.filter((e) => !e.defeated) : [];
@@ -1373,7 +1673,7 @@ ${SOCIAL_RULES}${G().prompt.socialExtra || ''}`;
                 <div class="ogt-roll-title">${esc(title)}${k.why ? `<span> · ${esc(k.why)}</span>` : ''}</div>
                 <div class="ogt-roll-math">${esc(math)}</div>
             </div>
-            <button class="ogt-check-btn" ${live ? '' : 'disabled'}>${live ? btn : 'Expired'}</button>${targetSel}${advBtn}
+            <button class="ogt-check-btn" ${live ? '' : 'disabled'}>${live ? btn : 'Expired'}</button>${rollerSel}${targetSel}${advBtn}
         </div>`;
     }
 
@@ -1408,7 +1708,7 @@ ${SOCIAL_RULES}${G().prompt.socialExtra || ''}`;
             const x = chat[i].extra;
             if (x?.ogt_quick) return x.ogt_quick;
             const r = x?.ogt_check?.result;
-            if (r && x.ogt_check.accepted !== false) return rollMessage(r, `${r.skill} check${x.ogt_check.why ? ` (${x.ogt_check.why})` : ''}`);
+            if (r && x.ogt_check.accepted !== false) return rollMessage(r, checkLabel(r, x.ogt_check)) + (x.ogt_check.after ? ` ${x.ogt_check.after}` : '');
             if (chat[i].is_user) return '';
         }
         return '';
@@ -1429,7 +1729,8 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         const rr = res.rerolled != null ? ` (the player spent Luck to reroll${res.rerolls > 1 ? ` ${res.rerolls} times` : ''}; the previous d20 was ${res.rerolled} — this is the final result)` : '';
         if (res.text) return `[ROLL] ${res.text}${rr}`;
         const bonus = res.bonus ? ` ${res.bonus >= 0 ? '+' : '−'} ${Math.abs(res.bonus)} ${res.trained ? 'skill' : res.ability ? AB_NAME[res.ability] : ''}`.trimEnd() : '';
-        const mod = (res.rel ? ` ${res.rel >= 0 ? '+' : '−'} ${Math.abs(res.rel)} ${res.npc ? res.npc + "'s" : 'their'} attitude` : '')
+        const mod = (res.help ? ` + ${res.help} ${res.helpName}'s help` : '')
+            + (res.rel ? ` ${res.rel >= 0 ? '+' : '−'} ${Math.abs(res.rel)} ${res.npc ? res.npc + "'s" : 'their'} attitude` : '')
             + (res.mod ? ` ${res.mod >= 0 ? '+' : '−'} ${Math.abs(res.mod)} situation` : '');
         const die = res.adv ? `d20 [${res.dice[0]}, ${res.dice[1]}] → ${res.nat} (${res.adv > 0 ? 'advantage' : 'disadvantage'})` : `d20 ${res.nat}`;
         const dc = res.dc == null ? '' : ` vs DC ${res.dc} — ${OUTCOME_TXT[res.outcome]}`;
@@ -1440,7 +1741,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
     // A failed roll can be rerolled by spending a Luck point BEFORE the narrator describes it (the new roll must be kept).
     const BAD_OUTCOMES = ['fail', 'badfail', 'critfail'];
     const luckOn = () => settings().luckRerolls;
-    const checkLabel = (res, chk) => `${res.skill} check${chk.why ? ` (${chk.why})` : ''}`;
+    const checkLabel = (res, chk) => `${res.byName ? res.byName + "'s " : ''}${res.skill} check${chk.why ? ` (${chk.why})` : ''}${res.byName ? ' — a companion took this check instead of the player' : ''}`;
 
     function resolveCheck(chk, dice, state) {
         return chk.kind === 'attack' ? resolveAttack(chk, dice, state)
@@ -1472,11 +1773,15 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (rolling) return;
         const chk = locateCheck(btn, false);
         if (!chk) return;
+        if (chk.cost) {
+            const payer = ownerOf(getState(), chk.by || 'player');
+            if (!payer || payer.mana < chk.cost) return notify('warning', `${payer?.name || 'They'} need${payer ? 's' : ''} ${chk.cost} ${G().terms.mana.toLowerCase()} for that.`);
+        }
         await spinDie(btn, 'Rolling…');
 
         const c = ctx(), state = getState();
-        // so a reroll can undo combat damage, the log entry and any change to the turn order
-        chk.pre = { hp: state.hp, enemies: clone(state.enemies), party: clone(state.party), log: clone(state.log), combat: clone(state.combat ?? null) };
+        // so a reroll can undo combat damage, spent mana, the log entry and any change to the turn order
+        chk.pre = { hp: state.hp, mana: state.mana, enemies: clone(state.enemies), party: clone(state.party), log: clone(state.log), combat: clone(state.combat ?? null) };
         const res = resolveCheck(chk, { a: d20(), b: d20() }, state);
         chk.result = res;
         rolling = false;
@@ -1487,8 +1792,19 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (!offer) delete chk.pre;
         if (isCombat(chk)) persist({ manual: true }); else scheduleSave();
         decorateRolls();
-        if (!offer) deliverRoll(rollMessage(res, checkLabel(res, chk)));
+        if (!offer) { endActionTurn(chk); deliverRoll(finalMsg(chk)); }
     }
+
+    /** A check created from the action bar ends that combatant's turn once its result is final (accepted or out of rerolls). */
+    function endActionTurn(chk) {
+        if (!chk.turn || chk.turnDone) return;
+        chk.turnDone = true;
+        const s = getState();
+        nextTurn(s);
+        chk.after = autoTurnsText(s, { enemies: !!settings().autoEnemies }) || undefined; // turns the game played next, told to the narrator with this result
+        persist({ manual: true });
+    }
+    const finalMsg = (chk) => rollMessage(chk.result, checkLabel(chk.result, chk)) + (chk.after ? ` ${chk.after}` : '');
 
     async function doReroll(btn) {
         if (rolling) return;
@@ -1500,7 +1816,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         const prev = chk.result.nat;
         spendLuck(state);
         if (chk.pre) { // undo the previous roll's damage
-            state.hp = chk.pre.hp; state.enemies = clone(chk.pre.enemies); state.party = clone(chk.pre.party || state.party);
+            state.hp = chk.pre.hp; state.mana = chk.pre.mana ?? state.mana; state.enemies = clone(chk.pre.enemies); state.party = clone(chk.pre.party || state.party);
             state.log = clone(chk.pre.log || state.log); state.combat = clone(chk.pre.combat ?? null);
         }
         const res = resolveCheck(chk, { a: d20(), b: d20() }, state);
@@ -1514,7 +1830,7 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (!again) delete chk.pre;
         persist({ manual: true });
         decorateRolls();
-        if (!again) deliverRoll(rollMessage(res, checkLabel(res, chk)));
+        if (!again) { endActionTurn(chk); deliverRoll(finalMsg(chk)); }
     }
 
     /** Spend 1 Luck before rolling: advantage on your own check/attack (cancels disadvantage), or disadvantage on an enemy's attack. */
@@ -1544,7 +1860,8 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         chk.accepted = true; delete chk.pre;
         scheduleSave();
         decorateRolls();
-        deliverRoll(rollMessage(chk.result, checkLabel(chk.result, chk)));
+        endActionTurn(chk);
+        deliverRoll(finalMsg(chk));
     }
 
     /** Roll a skill on your own initiative (no DC — the narrator judges the total). */
@@ -1560,6 +1877,144 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (last && !settings().showRollMsg) { last.extra = last.extra || {}; last.extra.ogt_quick = text; scheduleSave(); }
         deliverRoll(text);
     }
+    // ───────────────────────── combat action bar ─────────────────────────
+    // On a player-side turn (you or a companion you control) the Character tab shows that combatant's actions. Attacks and
+    // damaging abilities become normal roll cards (so Luck, advantage and rerolls all work); everything else resolves at once.
+    // Either way the turn passes to the next combatant when the action is final, and the result goes to the narrator.
+    let actSel = { foe: '', ally: 'player', item: '' };
+
+    /** Whoever's turn it is, if the player controls them: {id, ref (the sheet or member), name, kind}. */
+    function turnHolder(s) {
+        const o = s.combat?.order[s.combat.turn];
+        if (!o) return null;
+        if (o.kind === 'player') return { id: 'player', ref: s, name: s.name, kind: 'player' };
+        if (o.kind === 'party') {
+            const p = s.party.find((x) => `p:${x.id}` === o.id);
+            return p && isPlayed(p) ? { id: p.id, ref: p, name: p.name, kind: 'party' } : null;
+        }
+        return null;
+    }
+    /** Do you play this companion's turns (action bar), or does the game (tactics)? Per-ally setting, defaulting to the global one. */
+    const isPlayed = (p) => (p.control === 'me' ? true : p.control === 'auto' ? false : !!settings().allyControl);
+    const bagFor = (s, id) => ownerOf(s, id)?.inv || [];
+    const usableItems = (bag) => bag.filter((i) => (i.type === 'potion' || i.type === 'consumable') && (i.heal || i.mana));
+    const combatIdOf = (h) => (h.id === 'player' ? 'player' : `p:${h.id}`);
+
+    function actionGuard() {
+        const s = getState(), h = turnHolder(s);
+        if (!h) { notify('info', "It isn't a turn you control."); return null; }
+        if (isGenerating()) { notify('info', 'Wait for the reply to finish first.'); return null; }
+        return { s, h };
+    }
+
+    /** Weapon attack (no abilityId) or a damaging ability: puts a roll card on the newest message. */
+    function startAttackAction(abilityId) {
+        const g = actionGuard();
+        if (!g) return;
+        const { s, h } = g;
+        const ability = abilityId ? h.ref.abilities?.find((a) => a.id === abilityId) : null;
+        const foe = s.enemies.find((e) => e.id === actSel.foe && !e.defeated) || s.enemies.find((e) => !e.defeated);
+        if (!foe) return notify('info', 'There is no enemy to attack.');
+        if (ability && h.ref.mana < ability.cost) return notify('warning', `${h.name} needs ${ability.cost} ${G().terms.mana.toLowerCase()} for ${ability.name}.`);
+        const last = ctx().chat[ctx().chat.length - 1];
+        if (!last) return notify('warning', 'Send a message first.');
+        const open = last.extra?.ogt_check;
+        if (open && (!open.result || open.accepted === false)) return notify('info', 'Finish the roll that is already waiting first.');
+        const st = attackStats(s, h.id, !!ability, ability?.dmg, ability?.name);
+        last.extra = last.extra || {};
+        delete last.extra.ogt_roll;
+        last.extra.ogt_check = {
+            mod: 0, adv: 0, why: ability ? ability.name : st.how, kind: 'attack', spell: !!ability, target: foe.name, ac: foe.ac, bonus: st.bonus,
+            dmg: ability?.dmg, by: h.id, byName: h.name, abilityName: ability?.name, cost: ability?.cost || 0, turn: true,
+        };
+        persist({ manual: true });
+        decorateRolls();
+    }
+
+    /** An action with no roll card: record it, pass the turn, and tell the narrator what happened. */
+    function finishAction(text) {
+        const s = getState();
+        nextTurn(s);
+        sendGameText(s, text, autoTurnsText(s, { enemies: !!settings().autoEnemies })); // game-played allies (and enemies, if auto-play is on) go now
+    }
+
+    /** Record game-resolved text for the narrator (result + any automatic turns after it), save, and trigger the reply. */
+    function sendGameText(s, text, after = '') {
+        const last = ctx().chat[ctx().chat.length - 1];
+        const msg = `[ROLL] ${text}${after ? ' ' + after : ''}`;
+        if (last && !settings().showRollMsg) { last.extra = last.extra || {}; last.extra.ogt_quick = msg; }
+        persist({ manual: true });
+        deliverRoll(msg);
+    }
+
+    /** "Run enemy turns" button: let the game play the turns until it is yours again. */
+    function runTurnsNow() {
+        if (isGenerating()) return notify('info', 'Wait for the reply to finish first.');
+        const s = getState();
+        const t = autoTurnsText(s);
+        if (!t) return notify('info', 'No automatic turns to play right now.');
+        sendGameText(s, t);
+    }
+
+    function healAction(abilityId) {
+        const g = actionGuard();
+        if (!g) return;
+        const { s, h } = g;
+        const ab = h.ref.abilities?.find((a) => a.id === abilityId);
+        if (!ab) return;
+        if (h.ref.mana < ab.cost) return notify('warning', `${h.name} needs ${ab.cost} ${G().terms.mana.toLowerCase()} for ${ab.name}.`);
+        const t = ownerOf(s, actSel.ally) || s;
+        h.ref.mana -= ab.cost;
+        const before = t.hp;
+        t.hp = Math.min(t.hpMax, t.hp + rollDice(parseDice(ab.dmg, h.ref.level) || parseDice('1d8')).total);
+        finishAction(`${h.name} used ${ab.name} on ${t === h.ref ? 'themself' : t.name}: restored ${t.hp - before} HP (HP ${t.hp}/${t.hpMax}); spent ${ab.cost} ${G().terms.mana.toLowerCase()}.`);
+    }
+
+    function itemAction() {
+        const g = actionGuard();
+        if (!g) return;
+        const { s, h } = g;
+        const [iid, itype] = String(actSel.item || '').split('|');
+        const bag = bagFor(s, h.id);
+        const it = bag.find((x) => x.id === iid && x.type === itype);
+        if (!it) return notify('info', 'Pick an item first.');
+        const t = ownerOf(s, actSel.ally) || s, parts = [];
+        if (it.heal) { const b = t.hp; t.hp = Math.min(t.hpMax, t.hp + rollDice(parseDice(it.heal)).total); parts.push(`restored ${t.hp - b} HP`); }
+        if (it.mana && t.manaMax) { const b = t.mana; t.mana = Math.min(t.manaMax, t.mana + rollDice(parseDice(it.mana)).total); parts.push(`restored ${t.mana - b} ${G().terms.mana.toLowerCase()}`); }
+        it.qty -= 1;
+        if (it.qty <= 0) bag.splice(bag.indexOf(it), 1);
+        finishAction(`${h.name} used ${it.name}${t === h.ref ? '' : ` on ${t.name}`}${parts.length ? ': ' + parts.join(', ') : ''}.`);
+    }
+
+    function defendAction() {
+        const g = actionGuard();
+        if (!g) return;
+        const { s, h } = g;
+        s.combat.guard = { ...(s.combat.guard || {}), [combatIdOf(h)]: true };
+        finishAction(`${h.name} takes a defensive stance — attacks against them have disadvantage until their next turn.`);
+    }
+
+    function fleeAction() {
+        const g = actionGuard();
+        if (!g) return;
+        const { s, h } = g;
+        const live = s.enemies.filter((e) => !e.defeated).length, dc = clamp(8 + 2 * live, 10, 20);
+        const nat = d20(), mod = amod(s.stats?.dex), total = nat + mod;
+        const ok = nat === 20 || (nat !== 1 && total >= dc);
+        if (ok) s.enemies = []; // the fight is over; the tracker clears itself
+        finishAction(`${h.name} tries to lead the party out of the fight: d20 ${nat} ${fmtMod(mod)} = ${total} vs DC ${dc} — ${ok ? 'THE PARTY ESCAPES, combat is over' : 'FAILED, they are still in the fight'}.`);
+    }
+
+    function customAction() {
+        const g = actionGuard();
+        if (!g) return;
+        const el = document.getElementById('ogt-act-custom');
+        const t = el?.value.trim();
+        if (!t) return;
+        el.value = '';
+        sendAsPlayer(`(${g.h.name}'s turn) ${t}`);
+    }
+
     let decorateTimer = null;
     const scheduleDecorate = () => { clearTimeout(decorateTimer); decorateTimer = setTimeout(decorateRolls, 80); };
 
@@ -2038,7 +2493,11 @@ ${notes.map((t) => '- ' + t).join('\n')}` : '';
             <label class="ogt-field">Max skill rank<input type="number" min="1" max="10" data-ogt-setting="skillMaxRank" value="${s.skillMaxRank}"></label>
             ${chk('modelUnlockSkills', 'Let the story unlock new skills (free, rank 1)')}
             ${chk('trackRel', 'Track NPC relationship scores')}
+            ${genreOf(getState()).combat === false ? '' : `<label class="ogt-check"><input type="checkbox" data-ogt-combat ${getState().combatOff ? '' : 'checked'}> Combat system for this chat (HP, armor, enemies, initiative, attacks). Turn off for roleplay-only sessions.</label>`}
             ${chk('trackParty', 'Track party members (Party tab)')}
+            ${chk('autoEnemies', 'Auto-play enemy turns (and allies\' if you don\'t control them): the game rolls them and sends one summary to the narrator')}
+            ${chk('allyControl', 'Companions\' combat turns are mine by default (action bar). Off: the game plays them with their tactics. Each ally can override this.')}
+            ${chk('allyXp', 'Companions earn the same XP I do and level up')}
             <label class="ogt-field">Panel side<select data-ogt-setting="panelSide"><option value="left" ${s.panelSide === 'left' ? 'selected' : ''}>Left</option><option value="right" ${s.panelSide === 'right' ? 'selected' : ''}>Right</option></select></label>
             <div class="ogt-empty">Drag the 🔥 and ☰ buttons anywhere if they cover text.</div>
             <button class="ogt-btn ogt-wide" data-ogt-act="reset-buttons">Reset button positions</button>
@@ -2270,7 +2729,30 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             }
             case 'foe-del': state.enemies = state.enemies.filter((e) => e.id !== root?.dataset.eid); return persist({ manual: true });
             case 'foes-clear': state.enemies = []; return persist({ manual: true });
+            case 'act-attack': return startAttackAction();
+            case 'act-ability': {
+                const ab = turnHolder(state)?.ref.abilities?.find((a) => a.id === target.dataset.aid);
+                return ab?.kind === 'heal' ? healAction(ab.id) : startAttackAction(ab?.id);
+            }
+            case 'act-item': return itemAction();
+            case 'act-defend': return defendAction();
+            case 'act-flee': return fleeAction();
+            case 'act-custom': return customAction();
+            case 'ab-add': {
+                const o = ownerOf(state, target.dataset.owner);
+                if (!o) return;
+                const val = (k) => document.getElementById(`ogt-ab-${k}-${target.dataset.owner}`)?.value ?? '';
+                const a = addAbility(o, { name: val('name'), cost: val('cost') || 1, dmg: val('dmg') || '1d8', kind: val('kind') });
+                if (!a) return notify('warning', 'Give it a name (and no more than 6 abilities).');
+                return persist({ manual: true });
+            }
+            case 'ab-del': {
+                const o = ownerOf(state, target.dataset.owner);
+                if (o) o.abilities = (o.abilities || []).filter((x) => x.id !== target.dataset.aid);
+                return persist({ manual: true });
+            }
             case 'init-next': nextTurn(state); return persist({ manual: true });
+            case 'init-run': return runTurnsNow();
             case 'init-reroll': state.combat = null; return persist({ manual: true }); // syncInitiative rolls everyone again (and starts a fresh log)
             case 'skill-roll': if (skill) quickRoll(skill); return;
             case 'skill-up': {
@@ -2347,12 +2829,22 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             }
             ctx().chatMetadata.ogt_base = clone(state);
             scheduleSave(); refreshPrompt();
+        } else if (el.dataset.ogtPstat) {
+            const p = state.party.find((x) => x.id === el.closest('[data-pid]')?.dataset.pid);
+            if (!p || !ABILITIES.includes(el.dataset.ogtPstat)) return;
+            p.stats = p.stats || defaultMemberStats();
+            p.stats[el.dataset.ogtPstat] = clamp(Math.round(num(el.value, 10)), 3, 20);
+            ctx().chatMetadata.ogt_base = clone(state);
+            scheduleSave(); refreshPrompt();
         } else if (el.dataset.ogtPfield) {
             const p = state.party.find((x) => x.id === el.closest('[data-pid]')?.dataset.pid);
             if (!p) return;
             const k = el.dataset.ogtPfield;
-            if (!['skills', 'name', 'class', 'note', 'level', 'hp', 'hpMax', 'mana', 'manaMax', 'baseAc'].includes(k)) return;
+            if (!['skills', 'name', 'class', 'note', 'level', 'hp', 'hpMax', 'mana', 'manaMax', 'baseAc', 'control', 'stance', 'focus'].includes(k)) return;
             if (k === 'skills') p.skills = parseSkillText(el.value);
+            else if (k === 'control') p.control = ['me', 'auto'].includes(el.value) ? el.value : '';
+            else if (k === 'stance') p.stance = ['balanced', 'aggressive', 'defensive', 'support'].includes(el.value) ? el.value : 'balanced';
+            else if (k === 'focus') p.focus = String(el.value).slice(0, 40);
             else if (['name', 'class', 'note'].includes(k)) p[k] = el.value.slice(0, k === 'note' ? 120 : 40) || (k === 'name' ? p.name : '');
             else {
                 p[k] = Math.round(num(el.value, p[k]));
@@ -2387,6 +2879,14 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
 
     function onChange(e) {
         const el = e.target;
+        if (el.dataset.ogtSel) { actSel[el.dataset.ogtSel] = el.value; return; } // action-bar target / item pickers
+        if (el.dataset.ogtCombat !== undefined) { // per-chat combat on/off
+            const state = getState();
+            state.combatOff = !el.checked;
+            if (state.combatOff) { state.enemies = []; state.combat = null; state.log = []; } // nothing left over from a fight
+            persist({ manual: true });
+            return;
+        }
         if (el.dataset.ogtGive !== undefined) { // hand an item to someone else
             const to = el.value;
             el.value = '';
@@ -2408,7 +2908,7 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             return persist({ manual: true });
         }
         if (el.dataset.ogtSetting) { render(); return; }
-        if (el.dataset.ogtRelRange || el.dataset.ogtField || el.dataset.ogtStat || el.dataset.ogtPfield) persist({ manual: true });
+        if (el.dataset.ogtRelRange || el.dataset.ogtField || el.dataset.ogtStat || el.dataset.ogtPfield || el.dataset.ogtPstat) persist({ manual: true });
     }
 
     // ───────────────────────── movable floating buttons ─────────────────────────
@@ -2515,6 +3015,15 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
         });
         // choosing a different target on a pending attack card
         document.addEventListener('change', (e) => {
+            const who = e.target.closest?.('.ogt-roller-sel, .ogt-assist-sel');
+            if (who) { // who takes / helps with a skill check
+                const chk = locateCheck(who, false);
+                if (!chk) return;
+                if (who.classList.contains('ogt-roller-sel')) { chk.by = who.value === 'player' ? undefined : who.value; if (chk.assist === chk.by) chk.assist = undefined; }
+                else chk.assist = who.value || undefined;
+                scheduleSave(); decorateRolls();
+                return;
+            }
             const sel = e.target.closest?.('.ogt-target-sel');
             if (!sel) return;
             const chk = locateCheck(sel, false);

@@ -46,6 +46,7 @@
         defaultGenre: 'fantasy', // pre-selected in the character creator
         trackParty: true,
         allyXp: true, // companions earn the same XP you do and level up
+        quickRoll: true, // action-bar attacks roll immediately instead of waiting for a click on the roll card
         smartEnemies: false, // one small raw API call per round lets an AI choose enemy actions (falls back to the built-in AI)
         autoEnemies: false, // the game plays enemy turns itself and tells the narrator the results
         allyControl: true, // you play your companions' turns yourself (action bar); the narrator doesn't decide their attacks
@@ -1934,7 +1935,7 @@ ${SOCIAL_RULES}${G().prompt.socialExtra || ''}`;
                 <div class="ogt-roll-title">${esc(title)}${k.why ? `<span> · ${esc(k.why)}</span>` : ''}</div>
                 <div class="ogt-roll-math">${esc(math)}</div>
             </div>
-            <button class="ogt-check-btn" ${live ? '' : 'disabled'}>${live ? btn : 'Expired'}</button>${rollerSel}${targetSel}${advBtn}
+            <button class="ogt-check-btn" ${live ? '' : 'disabled'}>${live ? btn : 'Expired'}</button>${rollerSel}${targetSel}${advBtn}${live && k.turn && !k.result ? '<div class="ogt-decide"><button class="ogt-accept-btn ogt-cancel-btn" title="Pick a different action instead">Cancel</button></div>' : ''}
         </div>`;
     }
 
@@ -2183,9 +2184,11 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         if (!last) return notify('warning', 'Send a message first.');
         const open = last.extra?.ogt_check;
         if (open && (!open.result || open.accepted === false)) {
-            // a roll the narrator asked for must not lock the action bar: an unrolled attack request is simply replaced
-            if (open.turn || open.result || (open.kind !== 'attack' && open.kind !== 'defend')) return notify('info', 'Finish the roll that is already waiting first.');
-            notify('info', 'Replaced the narrator\'s pending attack with your chosen action.');
+            // A waiting roll must never lock the action bar. An unrolled attack/defend card (yours or the narrator's) is just swapped
+            // for the new choice; only a rolled-but-undecided result (reroll or accept) and a pending skill check have to be dealt with.
+            if (open.result) return notify('info', 'Accept or reroll the attack in the chat first (the Accept / Reroll buttons on its card).');
+            if (open.kind !== 'attack' && open.kind !== 'defend') return notify('info', 'Roll the skill check in the chat first.');
+            notify('info', open.turn ? 'Swapped your pending attack for the new action.' : 'Replaced the narrator\'s pending attack with your chosen action.');
         }
         const st = attackStats(s, h.id, !!ability, ability?.dmg, ability?.name);
         last.extra = last.extra || {};
@@ -2196,10 +2199,26 @@ Narrate exactly this outcome now, honestly, and let it matter. Do not request th
         };
         persist({ manual: true });
         decorateRolls();
+        if (settings().quickRoll) { // skip the extra click: roll the card we just made
+            const btn = document.querySelector(`#chat .mes[mesid="${ctx().chat.length - 1}"] .ogt-check-btn`);
+            if (btn) doCheckRoll(btn);
+        }
+    }
+
+    /** Drop a waiting roll card that you made from the action bar (nothing was spent), so you can choose again. */
+    function cancelActionCard(btn) {
+        const id = +btn.closest('.mes')?.getAttribute('mesid');
+        const m = ctx().chat[id];
+        if (!m?.extra?.ogt_check || !m.extra.ogt_check.turn || m.extra.ogt_check.result) return;
+        delete m.extra.ogt_check;
+        scheduleSave();
+        decorateRolls();
     }
 
     /** An action with no roll card: record it, pass the turn, and tell the narrator what happened. */
     async function finishAction(text) {
+        const mine = ctx().chat[ctx().chat.length - 1]?.extra;
+        if (mine?.ogt_check?.turn && !mine.ogt_check.result) delete mine.ogt_check; // an unrolled card of yours is superseded by this action
         nextTurn(getState());
         if (settings().autoEnemies) await planEnemyTurns(getState()); // smart enemies decide first (no-op when off)
         const s = getState();
@@ -2674,11 +2693,36 @@ In this game social interaction IS the gameplay, so lean on checks more than usu
         const eq = s.inv.filter((i) => i.equipped), pack = s.inv.filter((i) => !i.equipped);
         if (combat) h += `<div class="ogt-section">EQUIPPED</div>${eq.length ? eq.map(itemHtml).join('') : '<div class="ogt-empty">Nothing equipped.</div>'}`;
         h += `<div class="ogt-section">${combat ? 'PACK' : 'BELONGINGS'}</div>${(combat ? pack : s.inv).length ? (combat ? pack : s.inv).map(itemHtml).join('') : '<div class="ogt-empty">Nothing yet.</div>'}`;
-        const types = combat ? ITEM_TYPES : ['consumable', 'misc'];
-        h += `<div class="ogt-form"><input id="ogt-new-it" placeholder="Add item name"><select id="ogt-new-ittype">${types.map((t) => `<option value="${t}">${t}</option>`).join('')}</select>
-            ${combat ? '<input id="ogt-new-itstat" placeholder="Stat: weapon dice (1d8), armor AC (14), potion heal (2d4+2)">' : '<input id="ogt-new-itstat" type="hidden">'}
+        return h + addItemFormHtml(s, combat);
+    }
+
+    // ── "Add item": pick a category and fill in the fields that category actually has ──
+    let newItemCat = 'weapon';
+    const DICE_WEAPON = [['1d4', '1d4 · dagger'], ['1d6', '1d6 · shortsword, mace'], ['1d8', '1d8 · longsword, rapier'], ['1d10', '1d10 · halberd'], ['1d12', '1d12 · greataxe'], ['2d6', '2d6 · greatsword']];
+    const DICE_RESTORE = [['', 'none'], ['1d4', '1d4'], ['1d6', '1d6'], ['2d4+2', '2d4+2 · potion'], ['1d8+2', '1d8+2'], ['2d6+2', '2d6+2 · strong potion']];
+    function addItemFormHtml(s, combat) {
+        const cat = combat ? newItemCat : 'item';
+        const opts = (list, cur) => list.map(([v, l]) => `<option value="${esc(v)}" ${String(cur) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('');
+        const cap = Math.min(3, 1 + Math.floor(s.level / 4)); // the highest magic bonus normItem will allow at this level
+        const group = (c, inner) => `<div class="ogt-itf" data-cat="${c}" style="${cat === c ? '' : 'display:none'}">${inner}</div>`;
+        return `<div class="ogt-section">ADD AN ITEM</div><div class="ogt-form ogt-additem">
+            ${combat ? `<label>Category<select id="ogt-new-itcat">${opts([['weapon', 'Weapon'], ['armor', 'Armor'], ['shield', 'Shield'], ['item', 'Item (potion, consumable, misc)']], cat)}</select></label>` : ''}
+            <label>Name<input id="ogt-new-it" type="text" placeholder="e.g. Silver Longsword"></label>
+            ${combat ? group('weapon', `
+                <label>Damage<select id="ogt-new-wdmg">${opts(DICE_WEAPON, '1d8')}</select></label>
+                <label>Ability<select id="ogt-new-wabil">${opts([['str', 'Strength — melee'], ['dex', 'Dexterity — finesse, ranged']], 'str')}</select></label>
+                <label>Magic bonus (max +${cap} at your level)<select id="ogt-new-wbonus">${opts(Array.from({ length: cap + 1 }, (_, i) => [i, i ? `+${i}` : 'none']), 0)}</select></label>`)
+                + group('armor', `
+                <label>Armor Class<select id="ogt-new-aac">${opts([[11, '11 · light (leather)'], [12, '12 · light (studded)'], [13, '13 · medium (hide)'], [14, '14 · medium (chain shirt, scale)'], [15, '15 · medium (breastplate)'], [16, '16 · heavy (chain mail)'], [17, '17 · heavy (splint)'], [18, '18 · heavy (plate)']], 14)}</select></label>
+                <label>DEX bonus limit<select id="ogt-new-adex">${opts([['', 'Automatic (by weight)'], [5, 'No limit'], [2, 'Up to +2'], [0, 'None (heavy)']], '')}</select></label>`)
+                + group('shield', `<label>AC bonus<select id="ogt-new-sac">${opts([[1, '+1 · buckler'], [2, '+2 · shield'], [3, '+3 · tower shield']], 2)}</select></label>`) : ''}
+            ${group('item', `
+                <label>Kind<select id="ogt-new-itkind">${opts([['potion', 'Potion'], ['consumable', 'Consumable'], ['misc', 'Misc (no effect)']], combat ? 'potion' : 'consumable')}</select></label>
+                ${combat ? `<label>Restores HP<select id="ogt-new-iheal">${opts(DICE_RESTORE, '')}</select></label>
+                <label>Restores ${esc(G().terms.mana)}<select id="ogt-new-imana">${opts(DICE_RESTORE, '')}</select></label>` : ''}
+                <label>Quantity<input id="ogt-new-iqty" type="number" min="1" max="99" value="1"></label>`)}
+            <label>Note (optional)<input id="ogt-new-itdesc" type="text" placeholder="What it is, where it came from…"></label>
             <button class="ogt-btn ogt-wide" data-ogt-act="item-add">Add item</button></div>`;
-        return h;
     }
 
     // ── notes: small things that happened in the UI (drank a potion, switched weapon) that the narrator should know next turn ──
@@ -2766,6 +2810,7 @@ ${notes.map((t) => '- ' + t).join('\n')}` : '';
             ${genreOf(getState()).combat === false ? '' : `<label class="ogt-check"><input type="checkbox" data-ogt-combat ${getState().combatOff ? '' : 'checked'}> Combat system for this chat (HP, armor, enemies, initiative, attacks). Turn off for roleplay-only sessions.</label>`}
             ${chk('trackParty', 'Track party members (Party tab)')}
             ${chk('autoEnemies', 'Auto-play enemy turns (and allies\' if you don\'t control them): the game rolls them and sends one summary to the narrator')}
+            ${chk('quickRoll', 'Action-bar attacks roll immediately (no second click on the card). Turn off to use the 🍀 Advantage button or change your mind before rolling.')}
             ${chk('smartEnemies', 'Smart enemies: for each round of automatic enemy turns, ask the AI what they do with one tiny call (no chat history; the game still rolls everything). Falls back to the built-in AI if the call fails.')}
             ${chk('allyControl', 'Companions\' combat turns are mine by default (action bar). Off: the game plays them with their tactics. Each ally can override this.')}
             ${chk('allyXp', 'Companions earn the same XP I do and level up')}
@@ -3005,16 +3050,20 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             }
             case 'item-drop': if (item) { removeItem(state, item.name, 1); pushNote(`${state.name} discarded ${item.name}.`); } return persist({ manual: true });
             case 'item-add': {
-                const name = document.getElementById('ogt-new-it').value.trim();
-                if (!name) return;
-                const type = document.getElementById('ogt-new-ittype').value;
-                const stat = document.getElementById('ogt-new-itstat').value.trim();
-                const spec = { name, type };
-                if (type === 'weapon') spec.dmg = stat || '1d6';
-                else if (type === 'armor' || type === 'shield') spec.ac = num(stat, type === 'shield' ? 2 : 11);
-                else if (type === 'potion' || type === 'consumable') { spec.heal = stat; }
-                addItem(state, spec);
-                document.getElementById('ogt-new-it').value = ''; document.getElementById('ogt-new-itstat').value = '';
+                const val = (id) => document.getElementById(id)?.value ?? '';
+                const name = val('ogt-new-it').trim();
+                if (!name) return notify('warning', 'Give the item a name.');
+                const cat = hasCombat(state) ? val('ogt-new-itcat') || 'weapon' : 'item';
+                const spec = { name, desc: val('ogt-new-itdesc').trim() };
+                if (cat === 'weapon') Object.assign(spec, { type: 'weapon', dmg: val('ogt-new-wdmg'), ability: val('ogt-new-wabil'), bonus: num(val('ogt-new-wbonus')) });
+                else if (cat === 'armor') Object.assign(spec, { type: 'armor', ac: num(val('ogt-new-aac'), 11), dexCap: val('ogt-new-adex') });
+                else if (cat === 'shield') Object.assign(spec, { type: 'shield', ac: num(val('ogt-new-sac'), 2) });
+                else Object.assign(spec, { type: val('ogt-new-itkind') || 'misc', qty: num(val('ogt-new-iqty'), 1), heal: val('ogt-new-iheal'), mana: val('ogt-new-imana') });
+                const added = addItem(state, spec);
+                if (!added) return notify('warning', 'Could not add that item.');
+                if (cat === 'weapon' && added.bonus < spec.bonus) notify('info', `Magic bonus capped at +${added.bonus} for your level.`);
+                notify('success', `Added ${added.name}.`);
+                for (const id of ['ogt-new-it', 'ogt-new-itdesc']) { const el = document.getElementById(id); if (el) el.value = ''; }
                 return persist({ manual: true });
             }
             case 'foe-del': state.enemies = state.enemies.filter((e) => e.id !== root?.dataset.eid); return persist({ manual: true });
@@ -3170,6 +3219,11 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
     function onChange(e) {
         const el = e.target;
         if (el.dataset.ogtSel) { actSel[el.dataset.ogtSel] = el.value; return; } // action-bar target / item pickers
+        if (el.id === 'ogt-new-itcat') { // switching the Add-item category: show only that category's fields (keeps what you've typed)
+            newItemCat = el.value;
+            el.closest('.ogt-additem')?.querySelectorAll('.ogt-itf').forEach((g) => { g.style.display = g.dataset.cat === newItemCat ? '' : 'none'; });
+            return;
+        }
         if (el.dataset.ogtMerge !== undefined) { // fold a duplicate NPC into the right entry
             const from = el.closest('[data-rel]')?.dataset.rel, into = el.value;
             el.value = '';
@@ -3311,6 +3365,8 @@ Reply with ONLY one JSON object (no prose, no code fence) containing the CHANGES
             if (rr) return doReroll(rr);
             const av = e.target.closest('.ogt-adv-btn');
             if (av) return doAdvantage(av);
+            const cn = e.target.closest('.ogt-cancel-btn');
+            if (cn) return cancelActionCard(cn);
             const ac = e.target.closest('.ogt-accept-btn');
             if (ac) doAccept(ac);
         });

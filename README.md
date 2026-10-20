@@ -40,7 +40,7 @@ text; the spot is remembered per device (phone and desktop separately). *GM tab 
 | **Quests** | Active, completed and failed quests with difficulty, XP reward and milestones. Add quests by hand or let the narrator add them. |
 | **Party** | Your companions: bars, ability scores, skills, abilities, carried gear, XP, tactics. See [Party](#party-and-companions). |
 | **Skills** | Spend skill points from level-ups (a new skill costs 1; rank *r → r+1* costs *r+1*). **Roll** rolls a skill on your own initiative with no DC. Bonus = rank + the governing ability's modifier. |
-| **Gear** | Weapons, armor, shields, potions and misc items. Equip, use, drop or hand items to a companion. AC = armor + DEX (capped by the armor) + shield. |
+| **Gear** | Weapons, armor, shields, potions and misc items. Equip, use, drop or hand items to a companion. AC = armor + DEX (capped by the armor) + shield. **Add an item** with a category dropdown and the fields that category has: *Weapon* (damage dice, STR/DEX, magic bonus up to what your level allows), *Armor* (AC and DEX limit), *Shield* (AC bonus) or *Item* (potion / consumable / misc, HP and mana restored, quantity). |
 | **GM** | Every setting, the testing tools, the story scan and the reset. |
 
 ### Genres
@@ -100,7 +100,7 @@ drop out of the order; new enemies join it automatically.
 
 | Action | What it does |
 | --- | --- |
-| **⚔ Attack** | Weapon attack on the selected enemy. Creates a normal roll card, so Luck rerolls and advantage work. |
+| **⚔ Attack** | Weapon attack on the selected enemy. Creates a normal roll card and rolls it at once (setting *Action-bar attacks roll immediately*; turn it off to click the card yourself and use 🍀 Advantage first). Luck rerolls work either way. A waiting card never locks the bar: picking another action swaps it, or press **Cancel** on the card. |
 | **Abilities** | Each shows its mana cost and damage (or healing). Attack abilities roll to hit and cost mana even on a miss; heal abilities target the selected ally and resolve at once. |
 | **Item** | Use a potion or consumable on the selected ally. |
 | **🛡 Defend** | Attacks against you have disadvantage until your next turn. |
@@ -184,6 +184,7 @@ The tracker keeps **one entry per person**:
 | Track NPC relationship scores | NPC tiers and social-check bonuses. |
 | **Combat system for this chat** | Per chat. Off = roleplay-only: no HP, enemies, initiative or attacks. |
 | Track party members | Enables the Party tab and companion rules. |
+| Action-bar attacks roll immediately | On (default): Attack rolls at once. Off: a roll card waits for your click. |
 | **Auto-play enemy turns** | The game rolls enemy (and game-played ally) turns and sends one summary. |
 | **Smart enemies** | Each round of enemy turns, one tiny no-history API call picks their actions; falls back to the built-in AI. |
 | Companions' turns are mine by default | On = action bar; off = the game plays them. Each ally can override this. |
